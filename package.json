@@ -1,0 +1,19 @@
+{
+  "name": "ruview-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RuView - CSI-based presence/fall detection service MVP",
+  "scripts": {
+    "dev:web": "pnpm --filter web-monitor dev",
+    "build:web": "pnpm --filter web-monitor build",
+    "dev:api": "cd apps/api-gateway && uvicorn app.main:app --reload --port 8000",
+    "dev:adapter": "cd services/signal-adapter && uvicorn main:app --reload --port 8001",
+    "lint": "pnpm -r run lint",
+    "test": "pnpm -r run test",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=9"
+  }
+}

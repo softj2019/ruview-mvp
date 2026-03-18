@@ -1,0 +1,13 @@
+# Default
+* @softj2019
+
+# Frontend
+apps/web-monitor/ @softj2019
+
+# Backend
+apps/api-gateway/ @softj2019
+services/ @softj2019
+
+# Infrastructure
+infra/ @softj2019
+.github/ @softj2019
