@@ -36,6 +36,9 @@ docker-compose.override.yml
 CP210x_Drivers/
 CP210x_Windows_Drivers.zip
 
+# Vendor (cloned upstream repos)
+vendor/
+
 # Logs
 *.log
 logs/
