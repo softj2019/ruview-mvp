@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { Wifi, MapPin, Users, AlertTriangle } from 'lucide-react';
 import { useDeviceStore } from '@/stores/deviceStore';
 import { useEventStore } from '@/stores/eventStore';
@@ -10,12 +11,15 @@ const kpis = [
 ];
 
 export default function KpiCards() {
-  const onlineCount = useDeviceStore((s) => s.devices.filter((d) => d.status === 'online').length);
-  const activeZones = useDeviceStore((s) => s.devices.length);
-  const presenceCount = useEventStore((s) => s.events.filter((e) => e.type === 'presence_detected').length);
-  const criticalCount = useEventStore((s) => s.events.filter((e) => e.severity === 'critical').length);
+  const devices = useDeviceStore((s) => s.devices);
+  const events = useEventStore((s) => s.events);
 
-  const values = { onlineCount, activeZones, presenceCount, criticalCount };
+  const values = useMemo(() => ({
+    onlineCount: devices.filter((d) => d.status === 'online').length,
+    activeZones: devices.length,
+    presenceCount: events.filter((e) => e.type === 'presence_detected').length,
+    criticalCount: events.filter((e) => e.severity === 'critical').length,
+  }), [devices, events]);
 
   return (
     <div className="grid grid-cols-4 gap-4">

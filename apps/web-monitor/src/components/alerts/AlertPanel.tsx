@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useEventStore } from '@/stores/eventStore';
 import { AlertTriangle, UserCheck, Move, Footprints } from 'lucide-react';
 
@@ -18,16 +19,17 @@ const eventColors: Record<string, string> = {
 };
 
 export default function AlertPanel() {
-  const events = useEventStore((s) => s.events.slice(0, 10));
+  const events = useEventStore((s) => s.events);
+  const recentEvents = useMemo(() => events.slice(0, 10), [events]);
 
   return (
     <div className="card h-[250px] overflow-y-auto">
       <h3 className="text-sm font-medium text-gray-400 mb-3">Recent Events</h3>
       <div className="space-y-2">
-        {events.length === 0 ? (
+        {recentEvents.length === 0 ? (
           <p className="text-gray-500 text-sm">No events yet</p>
         ) : (
-          events.map((event) => {
+          recentEvents.map((event) => {
             const Icon = eventIcons[event.type] || AlertTriangle;
             const color = eventColors[event.type] || 'text-gray-400';
             return (

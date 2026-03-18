@@ -1,8 +1,10 @@
+import { useMemo } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, ResponsiveContainer } from 'recharts';
 import { useSignalStore } from '@/stores/signalStore';
 
 export default function SignalChart() {
-  const signalData = useSignalStore((s) => s.history.slice(-30));
+  const history = useSignalStore((s) => s.history);
+  const signalData = useMemo(() => history.slice(-30), [history]);
 
   return (
     <div className="card h-[250px]">
