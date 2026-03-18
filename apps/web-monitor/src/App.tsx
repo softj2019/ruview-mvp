@@ -4,22 +4,19 @@ import DashboardPage from './pages/DashboardPage';
 import DevicesPage from './pages/DevicesPage';
 import EventsPage from './pages/EventsPage';
 import SettingsPage from './pages/SettingsPage';
-import Layout from './components/Layout';
+import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore } from '@/stores/deviceStore';
 import { useZoneStore } from '@/stores/zoneStore';
 import { useEventStore } from '@/stores/eventStore';
 import { useSignalStore } from '@/stores/signalStore';
 
-// Auto-detect WebSocket URL based on current host
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
   const { hostname } = window.location;
-  // Local development
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
     return 'ws://localhost:8001/ws/events';
   }
-  // Cloudflare Pages or custom domain — use Tunnel endpoint
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${wsProtocol}//${hostname}/ws/events`;
 }
@@ -71,7 +68,7 @@ export default function App() {
   return (
     <DataProvider>
       <Routes>
-        <Route element={<Layout />}>
+        <Route element={<AppShell />}>
           <Route path="/" element={<DashboardPage />} />
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/events" element={<EventsPage />} />

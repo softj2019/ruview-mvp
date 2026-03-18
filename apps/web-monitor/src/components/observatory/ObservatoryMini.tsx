@@ -1,5 +1,7 @@
 import { useRef, useEffect, useState } from 'react';
 import { Maximize2, Minimize2, ExternalLink } from 'lucide-react';
+import { Card, CardHeader } from '@/components/ui';
+import { Button } from '@/components/ui';
 
 const OBSERVATORY_URL = '/observatory/index.html';
 
@@ -11,34 +13,24 @@ export default function ObservatoryMini() {
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.origin !== window.location.origin) return;
-      if (event.data?.type === 'observatory:status') {
-        // Handle status updates from RuView Observatory
-      }
     };
-
     window.addEventListener('message', handleMessage);
     return () => window.removeEventListener('message', handleMessage);
   }, []);
 
-  const toggleFullscreen = () => setIsFullscreen(!isFullscreen);
-  const openInNewTab = () => window.open(OBSERVATORY_URL, '_blank');
-
   if (isFullscreen) {
     return (
-      <div className="fixed inset-0 z-50 bg-surface-900">
-        <div className="absolute top-4 right-4 z-10 flex gap-2">
-          <button
-            onClick={toggleFullscreen}
-            className="p-2 bg-surface-800 border border-surface-600 rounded-lg hover:border-neon-cyan/50 text-gray-400 hover:text-neon-cyan transition-colors"
-          >
-            <Minimize2 className="w-4 h-4" />
-          </button>
+      <div className="fixed inset-0 z-50 bg-gray-950">
+        <div className="absolute right-4 top-4 z-10">
+          <Button variant="outline" size="sm" onClick={() => setIsFullscreen(false)}>
+            <Minimize2 className="h-4 w-4" />
+          </Button>
         </div>
         <iframe
           ref={iframeRef}
           src={OBSERVATORY_URL}
-          className="w-full h-full border-0"
-          title="RuView Observatory"
+          className="h-full w-full border-0"
+          title="RuView 관측소"
           onLoad={() => setLoaded(true)}
         />
       </div>
@@ -46,40 +38,38 @@ export default function ObservatoryMini() {
   }
 
   return (
-    <div className="card-glow h-[400px] relative">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-sm font-medium text-gray-400">3D Observatory</h3>
+    <Card variant="glow" className="h-[420px]">
+      <div className="mb-2 flex items-center justify-between">
+        <CardHeader className="mb-0">3D 관측소</CardHeader>
         <div className="flex gap-1">
           <button
-            onClick={openInNewTab}
-            className="text-gray-500 hover:text-neon-cyan transition-colors p-1"
-            title="Open in new tab"
+            onClick={() => window.open(OBSERVATORY_URL, '_blank')}
+            className="rounded p-1 text-gray-500 transition-colors hover:text-cyan-400"
           >
-            <ExternalLink className="w-3.5 h-3.5" />
+            <ExternalLink className="h-3.5 w-3.5" />
           </button>
           <button
-            onClick={toggleFullscreen}
-            className="text-gray-500 hover:text-neon-cyan transition-colors p-1"
-            title="Fullscreen"
+            onClick={() => setIsFullscreen(true)}
+            className="rounded p-1 text-gray-500 transition-colors hover:text-cyan-400"
           >
-            <Maximize2 className="w-3.5 h-3.5" />
+            <Maximize2 className="h-3.5 w-3.5" />
           </button>
         </div>
       </div>
-      <div className="w-full h-[calc(100%-2rem)] rounded-lg overflow-hidden border border-surface-600 relative">
+      <div className="relative h-[calc(100%-2.5rem)] overflow-hidden rounded-lg border border-gray-800">
         <iframe
           ref={iframeRef}
           src={OBSERVATORY_URL}
-          className="w-full h-full border-0"
-          title="RuView Observatory"
+          className="h-full w-full border-0"
+          title="RuView 관측소"
           onLoad={() => setLoaded(true)}
         />
         {!loaded && (
-          <div className="absolute inset-0 flex items-center justify-center bg-surface-900 text-gray-500 text-sm">
-            Loading Observatory...
+          <div className="absolute inset-0 flex items-center justify-center bg-gray-950 text-sm text-gray-600">
+            관측소 로딩 중...
           </div>
         )}
       </div>
-    </div>
+    </Card>
   );
 }

@@ -1,5 +1,7 @@
 import { useDeviceStore } from '@/stores/deviceStore';
 import { Wifi, WifiOff, Signal, MapPin, Clock } from 'lucide-react';
+import { Card, Badge, StatusDot, EmptyState } from '@/components/ui';
+import { cn } from '@/lib/utils';
 
 export default function DevicesPage() {
   const devices = useDeviceStore((s) => s.devices);
@@ -7,54 +9,57 @@ export default function DevicesPage() {
   const selectDevice = useDeviceStore((s) => s.selectDevice);
 
   return (
-    <div className="space-y-4">
-      <h2 className="text-xl font-semibold">Device Management</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+    <div className="space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-gray-100">디바이스 관리</h1>
+        <p className="text-sm text-gray-500 mt-0.5">연결된 센서 노드 현황</p>
+      </div>
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
         {devices.map((device) => (
-          <div
+          <Card
             key={device.id}
+            className={cn(
+              'cursor-pointer transition-all hover:border-cyan-800',
+              device.id === selectedId && 'border-cyan-700 shadow-lg shadow-cyan-500/10',
+            )}
             onClick={() => selectDevice(device.id === selectedId ? null : device.id)}
-            className={`card cursor-pointer transition-all hover:border-neon-cyan/50 ${
-              device.id === selectedId ? 'border-neon-cyan shadow-lg shadow-neon-cyan/10' : ''
-            }`}
           >
-            <div className="flex items-center gap-3 mb-3">
+            <div className="mb-3 flex items-center gap-3">
+              <StatusDot status={device.status === 'online' ? 'online' : 'offline'} />
               {device.status === 'online' ? (
-                <Wifi className="w-5 h-5 text-neon-green" />
+                <Wifi className="h-5 w-5 text-emerald-400" />
               ) : (
-                <WifiOff className="w-5 h-5 text-gray-500" />
+                <WifiOff className="h-5 w-5 text-gray-600" />
               )}
-              <h3 className="font-medium">{device.name}</h3>
-              <span className={`ml-auto text-xs px-2 py-0.5 rounded-full ${
-                device.status === 'online'
-                  ? 'bg-neon-green/10 text-neon-green'
-                  : 'bg-gray-500/10 text-gray-500'
-              }`}>
-                {device.status}
-              </span>
+              <h3 className="font-medium text-gray-200">{device.name}</h3>
+              <Badge variant={device.status === 'online' ? 'success' : 'default'} className="ml-auto">
+                {device.status === 'online' ? '온라인' : '오프라인'}
+              </Badge>
             </div>
             <div className="space-y-1.5 text-sm text-gray-400">
               <div className="flex items-center gap-2">
-                <Signal className="w-3.5 h-3.5" />
-                <span>Signal: {device.signalStrength ?? '--'} dBm</span>
+                <Signal className="h-3.5 w-3.5 text-gray-500" />
+                <span>신호: {device.signalStrength ?? '--'} dBm</span>
               </div>
               <div className="flex items-center gap-2">
-                <MapPin className="w-3.5 h-3.5" />
-                <span>Position: ({device.x}, {device.y})</span>
+                <MapPin className="h-3.5 w-3.5 text-gray-500" />
+                <span>위치: ({device.x}, {device.y})</span>
               </div>
               <div className="flex items-center gap-2">
-                <Clock className="w-3.5 h-3.5" />
+                <Clock className="h-3.5 w-3.5 text-gray-500" />
                 <span>MAC: {device.mac}</span>
               </div>
-              <div className="text-xs text-gray-500">
-                FW: {device.firmwareVersion}
-              </div>
+              <p className="text-xs text-gray-600">펌웨어: {device.firmwareVersion}</p>
             </div>
-          </div>
+          </Card>
         ))}
         {devices.length === 0 && (
-          <div className="col-span-full text-center text-gray-500 py-12">
-            No devices connected. Start the mock server or connect ESP32-S3.
+          <div className="col-span-full">
+            <EmptyState
+              icon={Wifi}
+              title="연결된 디바이스가 없습니다"
+              description="Mock 서버를 시작하거나 ESP32-S3를 연결하세요."
+            />
           </div>
         )}
       </div>

@@ -66,19 +66,19 @@ export const PRESETS = {
 
 // Scenario descriptions shown below the dropdown
 const SCENARIO_DESCRIPTIONS = {
-  auto:              'Auto-cycling through all sensing scenarios.',
-  empty_room:        'Baseline calibration with no human presence in the monitored zone.',
-  single_breathing:  'Detecting vital signs through WiFi signal micro-variations.',
-  two_walking:       'Tracking multiple people simultaneously via CSI multiplex separation.',
-  fall_event:        'Sudden posture-change detection using acceleration feature analysis.',
-  sleep_monitoring:  'Monitoring breathing patterns and apnea events during sleep.',
-  intrusion_detect:  'Passive perimeter monitoring -- no cameras, pure RF sensing.',
-  gesture_control:   'DTW-based gesture recognition from hand/arm motion signatures.',
-  crowd_occupancy:   'Estimating room occupancy count from aggregate CSI variance.',
-  search_rescue:     'Through-wall survivor detection using WiFi-MAT multistatic mode.',
-  elderly_care:      'Continuous gait analysis for early mobility-decline detection.',
-  fitness_tracking:  'Rep counting and exercise classification from body kinematics.',
-  security_patrol:   'Multi-zone presence patrol with camera-free motion heatmaps.',
+  auto:              '모든 센싱 시나리오를 자동으로 순환합니다.',
+  empty_room:        '모니터링 존에 사람이 없는 상태의 기준선 캘리브레이션.',
+  single_breathing:  'WiFi 신호 미세 변화를 통한 생체 신호 감지.',
+  two_walking:       'CSI 다중 분리를 통한 여러 사람 동시 추적.',
+  fall_event:        '가속도 특징 분석을 통한 급격한 자세 변화 감지.',
+  sleep_monitoring:  '수면 중 호흡 패턴 및 무호흡 이벤트 모니터링.',
+  intrusion_detect:  '카메라 없는 수동형 경계 모니터링 — 순수 RF 센싱.',
+  gesture_control:   '손/팔 움직임 서명으로부터 DTW 기반 제스처 인식.',
+  crowd_occupancy:   '집합 CSI 분산으로부터 실내 인원 수 추정.',
+  search_rescue:     'WiFi-MAT 멀티스태틱 모드를 이용한 벽 너머 생존자 탐지.',
+  elderly_care:      '조기 이동성 저하 감지를 위한 지속적 보행 분석.',
+  fitness_tracking:  '신체 운동학으로부터 반복 횟수 카운팅 및 운동 분류.',
+  security_patrol:   '카메라 없는 움직임 히트맵을 이용한 다중 존 순찰.',
 };
 
 // Edge modules active per scenario
@@ -430,9 +430,9 @@ export class HudController {
     if (presEl) {
       const ml = cls.motion_level || 'absent';
       presEl.className = 'presence-state';
-      if (ml === 'active') { presEl.classList.add('presence--active'); presLabel.textContent = 'ACTIVE'; }
-      else if (cls.presence) { presEl.classList.add('presence--present'); presLabel.textContent = 'PRESENT'; }
-      else { presEl.classList.add('presence--absent'); presLabel.textContent = 'ABSENT'; }
+      if (ml === 'active') { presEl.classList.add('presence--active'); presLabel.textContent = '활동 중'; }
+      else if (cls.presence) { presEl.classList.add('presence--present'); presLabel.textContent = '재실'; }
+      else { presEl.classList.add('presence--absent'); presLabel.textContent = '부재'; }
     }
 
     const fallEl = document.getElementById('fall-alert');

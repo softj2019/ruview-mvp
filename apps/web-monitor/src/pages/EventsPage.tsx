@@ -1,5 +1,6 @@
 import { useEventStore } from '@/stores/eventStore';
 import { AlertTriangle, UserCheck, Move, Footprints, ShieldAlert, WifiOff, SignalLow, DoorOpen } from 'lucide-react';
+import { Card, Badge, Button, EmptyState } from '@/components/ui';
 
 const iconMap: Record<string, typeof AlertTriangle> = {
   fall_suspected: AlertTriangle,
@@ -12,10 +13,10 @@ const iconMap: Record<string, typeof AlertTriangle> = {
   signal_weak: SignalLow,
 };
 
-const severityColors: Record<string, string> = {
-  info: 'text-neon-cyan bg-neon-cyan/10',
-  warning: 'text-neon-orange bg-neon-orange/10',
-  critical: 'text-neon-red bg-neon-red/10',
+const severityVariant: Record<string, 'info' | 'warning' | 'danger'> = {
+  info: 'info',
+  warning: 'warning',
+  critical: 'danger',
 };
 
 export default function EventsPage() {
@@ -23,63 +24,62 @@ export default function EventsPage() {
   const clearEvents = useEventStore((s) => s.clearEvents);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-6">
       <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold">Event History</h2>
-        <div className="flex gap-2">
-          <span className="text-sm text-gray-400">{events.length} events</span>
-          <button
-            onClick={clearEvents}
-            className="text-xs px-3 py-1 rounded border border-surface-600 hover:border-neon-red/50 text-gray-400 hover:text-neon-red transition-colors"
-          >
-            Clear
-          </button>
+        <div>
+          <h1 className="text-xl font-semibold text-gray-100">이벤트 기록</h1>
+          <p className="text-sm text-gray-500 mt-0.5">{events.length}개 이벤트</p>
         </div>
+        <Button variant="danger" size="sm" onClick={clearEvents}>
+          초기화
+        </Button>
       </div>
-      <div className="card">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-gray-500 border-b border-surface-600">
-              <th className="pb-2 pl-2">Type</th>
-              <th className="pb-2">Severity</th>
-              <th className="pb-2">Device</th>
-              <th className="pb-2">Zone</th>
-              <th className="pb-2">Confidence</th>
-              <th className="pb-2 pr-2">Time</th>
-            </tr>
-          </thead>
-          <tbody>
-            {events.map((event) => {
-              const Icon = iconMap[event.type] || AlertTriangle;
-              const sevClass = severityColors[event.severity] || 'text-gray-400';
-              return (
-                <tr key={event.id} className="border-b border-surface-600/50 hover:bg-surface-700/30">
-                  <td className="py-2 pl-2">
-                    <div className="flex items-center gap-2">
-                      <Icon className="w-4 h-4 shrink-0" />
-                      <span>{event.type.replace(/_/g, ' ')}</span>
-                    </div>
-                  </td>
-                  <td>
-                    <span className={`text-xs px-2 py-0.5 rounded-full ${sevClass}`}>
-                      {event.severity}
-                    </span>
-                  </td>
-                  <td className="text-gray-400">{event.deviceId}</td>
-                  <td className="text-gray-400">{event.zone}</td>
-                  <td className="text-gray-400">{(event.confidence * 100).toFixed(0)}%</td>
-                  <td className="pr-2 text-gray-500 text-xs">
-                    {new Date(event.timestamp).toLocaleTimeString()}
-                  </td>
+      <Card>
+        {events.length === 0 ? (
+          <EmptyState icon={AlertTriangle} title="기록된 이벤트가 없습니다" />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-gray-800 text-left text-gray-500">
+                  <th className="pb-3 pl-2 font-medium">유형</th>
+                  <th className="pb-3 font-medium">심각도</th>
+                  <th className="pb-3 font-medium">디바이스</th>
+                  <th className="pb-3 font-medium">존</th>
+                  <th className="pb-3 font-medium">신뢰도</th>
+                  <th className="pb-3 pr-2 font-medium">시간</th>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
-        {events.length === 0 && (
-          <p className="text-center text-gray-500 py-8">No events recorded yet</p>
+              </thead>
+              <tbody>
+                {events.map((event) => {
+                  const Icon = iconMap[event.type] || AlertTriangle;
+                  return (
+                    <tr key={event.id} className="border-b border-gray-800/50 hover:bg-gray-800/30">
+                      <td className="py-2.5 pl-2">
+                        <div className="flex items-center gap-2">
+                          <Icon className="h-4 w-4 shrink-0 text-gray-400" />
+                          <span className="text-gray-300">{event.type.replace(/_/g, ' ')}</span>
+                        </div>
+                      </td>
+                      <td>
+                        <Badge variant={severityVariant[event.severity] || 'default'}>
+                          {event.severity === 'critical' ? '긴급' : event.severity === 'warning' ? '경고' : '정보'}
+                        </Badge>
+                      </td>
+                      <td className="text-gray-400">{event.deviceId}</td>
+                      <td className="text-gray-400">{event.zone}</td>
+                      <td className="text-gray-400">{(event.confidence * 100).toFixed(0)}%</td>
+                      <td className="pr-2 text-xs text-gray-500">
+                        {new Date(event.timestamp).toLocaleTimeString()}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }

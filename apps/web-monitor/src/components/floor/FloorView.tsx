@@ -1,31 +1,35 @@
-import { useRef, useState, useCallback } from 'react';
+import { useRef } from 'react';
 import { useDeviceStore } from '@/stores/deviceStore';
 import { useZoneStore } from '@/stores/zoneStore';
+import { Card, CardHeader } from '@/components/ui';
 
 const FLOOR_WIDTH = 800;
-const FLOOR_HEIGHT = 600;
+const FLOOR_HEIGHT = 500;
 
 export default function FloorView() {
   const svgRef = useRef<SVGSVGElement>(null);
-  const [viewBox, setViewBox] = useState(`0 0 ${FLOOR_WIDTH} ${FLOOR_HEIGHT}`);
   const devices = useDeviceStore((s) => s.devices);
   const zones = useZoneStore((s) => s.zones);
 
   return (
-    <div className="card-glow h-[400px] relative">
-      <h3 className="text-sm font-medium text-gray-400 mb-2">Floor Plan</h3>
+    <Card variant="glow" className="h-[420px]">
+      <CardHeader>평면도</CardHeader>
       <svg
         ref={svgRef}
-        viewBox={viewBox}
-        className="w-full h-full"
-        style={{ background: 'radial-gradient(circle, #12121A 0%, #0A0A0F 100%)' }}
+        viewBox={`0 0 ${FLOOR_WIDTH} ${FLOOR_HEIGHT}`}
+        className="h-full w-full"
       >
         {/* Grid */}
         <defs>
           <pattern id="grid" width="50" height="50" patternUnits="userSpaceOnUse">
-            <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#222230" strokeWidth="0.5" />
+            <path d="M 50 0 L 0 0 0 50" fill="none" stroke="#1f2937" strokeWidth="0.5" />
           </pattern>
+          <radialGradient id="coverage-grad">
+            <stop offset="0%" stopColor="#22d3ee" stopOpacity="0.08" />
+            <stop offset="100%" stopColor="#22d3ee" stopOpacity="0" />
+          </radialGradient>
         </defs>
+        <rect width="100%" height="100%" fill="#030712" />
         <rect width="100%" height="100%" fill="url(#grid)" />
 
         {/* Zones */}
@@ -33,34 +37,28 @@ export default function FloorView() {
           <polygon
             key={zone.id}
             points={zone.polygon.map((p) => `${p.x},${p.y}`).join(' ')}
-            fill={zone.status === 'active' ? 'rgba(0,240,255,0.1)' : 'rgba(100,100,100,0.05)'}
-            stroke={zone.status === 'active' ? '#00F0FF' : '#333'}
+            fill={zone.status === 'active' ? 'rgba(34,211,238,0.08)' : 'rgba(107,114,128,0.03)'}
+            stroke={zone.status === 'active' ? '#22d3ee' : '#374151'}
             strokeWidth="1"
+            className="transition-colors duration-500"
           />
         ))}
 
         {/* Devices */}
         {devices.map((device) => (
           <g key={device.id} transform={`translate(${device.x},${device.y})`}>
-            {/* Coverage arc */}
-            <circle
-              r="80"
-              fill={device.status === 'online' ? 'rgba(0,255,136,0.05)' : 'rgba(100,100,100,0.02)'}
-              stroke={device.status === 'online' ? '#00FF8844' : '#33333344'}
-              strokeWidth="0.5"
-            />
-            {/* Device marker */}
+            <circle r="80" fill="url(#coverage-grad)" />
             <circle
               r="6"
-              fill={device.status === 'online' ? '#00FF88' : '#666'}
-              className={device.status === 'online' ? 'animate-pulse-slow' : ''}
+              fill={device.status === 'online' ? '#34d399' : '#4b5563'}
+              className={device.status === 'online' ? 'animate-pulse' : ''}
             />
-            <text y="18" textAnchor="middle" className="fill-gray-400 text-[10px]">
+            <text y="20" textAnchor="middle" fill="#9ca3af" fontSize="10">
               {device.name}
             </text>
           </g>
         ))}
       </svg>
-    </div>
+    </Card>
   );
 }

@@ -1,7 +1,15 @@
 import { useState } from 'react';
-import { Settings, Play, Wifi, Database, Monitor } from 'lucide-react';
+import { Settings, Play, Wifi, Monitor } from 'lucide-react';
+import { Card, CardHeader, Button, Badge } from '@/components/ui';
+import { cn } from '@/lib/utils';
 
-const scenarios = ['idle', 'presence', 'motion', 'fall', 'breathing'];
+const scenarios = [
+  { id: 'idle', label: '대기' },
+  { id: 'presence', label: '재실' },
+  { id: 'motion', label: '움직임' },
+  { id: 'fall', label: '낙상' },
+  { id: 'breathing', label: '호흡' },
+];
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001';
 
@@ -14,80 +22,81 @@ export default function SettingsPage() {
       const res = await fetch(`${API_URL}/api/scenario/${scenario}`, { method: 'POST' });
       const data = await res.json();
       setActiveScenario(data.scenario);
-      setStatus(`Scenario changed to: ${data.scenario}`);
+      setStatus(`시나리오 변경: ${data.scenario}`);
     } catch {
-      setStatus('Failed to change scenario');
+      setStatus('시나리오 변경 실패');
     }
   };
 
   return (
-    <div className="space-y-6 max-w-2xl">
-      <h2 className="text-xl font-semibold flex items-center gap-2">
-        <Settings className="w-5 h-5" /> Settings
-      </h2>
+    <div className="max-w-2xl space-y-6">
+      <div>
+        <h1 className="text-xl font-semibold text-gray-100 flex items-center gap-2">
+          <Settings className="h-5 w-5" /> 설정
+        </h1>
+        <p className="text-sm text-gray-500 mt-0.5">시뮬레이션 및 연결 설정</p>
+      </div>
 
-      {/* Mock Scenario Control */}
-      <div className="card">
-        <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
-          <Play className="w-4 h-4" /> Simulation Scenario
-        </h3>
+      <Card>
+        <CardHeader>
+          <span className="flex items-center gap-2"><Play className="h-4 w-4" /> 시뮬레이션 시나리오</span>
+        </CardHeader>
         <div className="flex flex-wrap gap-2">
-          {scenarios.map((s) => (
+          {scenarios.map(({ id, label }) => (
             <button
-              key={s}
-              onClick={() => changeScenario(s)}
-              className={`px-4 py-2 rounded-lg text-sm transition-all ${
-                activeScenario === s
-                  ? 'bg-neon-cyan/20 text-neon-cyan border border-neon-cyan/50'
-                  : 'bg-surface-700 text-gray-400 border border-surface-600 hover:border-neon-cyan/30'
-              }`}
+              key={id}
+              onClick={() => changeScenario(id)}
+              className={cn(
+                'rounded-lg border px-4 py-2 text-sm font-medium transition-all',
+                activeScenario === id
+                  ? 'border-cyan-700 bg-cyan-500/10 text-cyan-400'
+                  : 'border-gray-800 bg-gray-900 text-gray-400 hover:border-cyan-800 hover:text-gray-300',
+              )}
             >
-              {s}
+              {label}
             </button>
           ))}
         </div>
-        {status && <p className="mt-2 text-xs text-gray-500">{status}</p>}
-      </div>
+        {status && <p className="mt-3 text-xs text-gray-500">{status}</p>}
+      </Card>
 
-      {/* Connection Info */}
-      <div className="card">
-        <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
-          <Wifi className="w-4 h-4" /> Connection
-        </h3>
-        <div className="space-y-2 text-sm text-gray-400">
-          <div className="flex justify-between">
-            <span>WebSocket</span>
-            <code className="text-xs bg-surface-700 px-2 py-0.5 rounded">
+      <Card>
+        <CardHeader>
+          <span className="flex items-center gap-2"><Wifi className="h-4 w-4" /> 연결 정보</span>
+        </CardHeader>
+        <div className="space-y-2 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">WebSocket</span>
+            <code className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">
               {import.meta.env.VITE_WS_URL || 'ws://localhost:8001/ws/events'}
             </code>
           </div>
-          <div className="flex justify-between">
-            <span>API</span>
-            <code className="text-xs bg-surface-700 px-2 py-0.5 rounded">{API_URL}</code>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">API</span>
+            <code className="rounded bg-gray-800 px-2 py-0.5 text-xs text-gray-300">{API_URL}</code>
           </div>
         </div>
-      </div>
+      </Card>
 
-      {/* System Info */}
-      <div className="card">
-        <h3 className="text-sm font-medium text-gray-400 mb-3 flex items-center gap-2">
-          <Monitor className="w-4 h-4" /> System
-        </h3>
-        <div className="space-y-2 text-sm text-gray-400">
-          <div className="flex justify-between">
-            <span>Mode</span>
-            <span className="text-neon-orange">Mock / Simulation</span>
+      <Card>
+        <CardHeader>
+          <span className="flex items-center gap-2"><Monitor className="h-4 w-4" /> 시스템 정보</span>
+        </CardHeader>
+        <div className="space-y-2 text-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">모드</span>
+            <Badge variant="warning">Mock 시뮬레이션</Badge>
           </div>
-          <div className="flex justify-between">
-            <span>ESP32 Target</span>
-            <span>ESP32-S3-DevKitC-1 (pending)</span>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">ESP32 타겟</span>
+            <span className="text-gray-300">ESP32-S3-DevKitC-1 (배송 중)</span>
           </div>
-          <div className="flex justify-between">
-            <span>Firmware</span>
-            <span>RuView v0.5.0</span>
+          <div className="flex items-center justify-between">
+            <span className="text-gray-400">펌웨어</span>
+            <span className="text-gray-300">RuView v0.5.0</span>
           </div>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
