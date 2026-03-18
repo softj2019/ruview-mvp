@@ -22,43 +22,52 @@ export function useWebSocket({
   const wsRef = useRef<WebSocket | null>(null);
   const attemptsRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const callbacksRef = useRef({ onMessage, onOpen, onClose, onError });
+
+  // Update callbacks ref without triggering reconnect
+  callbacksRef.current = { onMessage, onOpen, onClose, onError };
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    const ws = new WebSocket(url);
+    try {
+      const ws = new WebSocket(url);
 
-    ws.onopen = () => {
-      attemptsRef.current = 0;
-      onOpen?.();
-    };
+      ws.onopen = () => {
+        attemptsRef.current = 0;
+        callbacksRef.current.onOpen?.();
+      };
 
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        onMessage(data);
-      } catch {
-        onMessage(event.data);
-      }
-    };
+      ws.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          callbacksRef.current.onMessage(data);
+        } catch {
+          callbacksRef.current.onMessage(event.data);
+        }
+      };
 
-    ws.onclose = () => {
-      onClose?.();
-      if (attemptsRef.current < maxReconnectAttempts) {
-        const delay = reconnectInterval * Math.pow(2, attemptsRef.current);
-        timerRef.current = setTimeout(() => {
-          attemptsRef.current++;
-          connect();
-        }, Math.min(delay, 30000));
-      }
-    };
+      ws.onclose = () => {
+        callbacksRef.current.onClose?.();
+        if (attemptsRef.current < maxReconnectAttempts) {
+          const delay = reconnectInterval * Math.pow(2, attemptsRef.current);
+          timerRef.current = setTimeout(() => {
+            attemptsRef.current++;
+            connect();
+          }, Math.min(delay, 30000));
+        }
+      };
 
-    ws.onerror = (error) => {
-      onError?.(error);
-    };
+      ws.onerror = (error) => {
+        callbacksRef.current.onError?.(error);
+      };
 
-    wsRef.current = ws;
-  }, [url, onMessage, onOpen, onClose, onError, reconnectInterval, maxReconnectAttempts]);
+      wsRef.current = ws;
+    } catch {
+      // WebSocket construction can fail (e.g., invalid URL)
+      console.warn('[WS] Failed to create WebSocket connection');
+    }
+  }, [url, reconnectInterval, maxReconnectAttempts]);
 
   useEffect(() => {
     connect();
