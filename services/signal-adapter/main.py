@@ -5,10 +5,16 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .ws_manager import ConnectionManager
-from .csi_processor import CSIProcessor
-from .event_engine import EventEngine
-from .supabase_client import get_supabase
+try:
+    from .ws_manager import ConnectionManager
+    from .csi_processor import CSIProcessor
+    from .event_engine import EventEngine
+    from .supabase_client import get_supabase
+except ImportError:
+    from ws_manager import ConnectionManager
+    from csi_processor import CSIProcessor
+    from event_engine import EventEngine
+    from supabase_client import get_supabase
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 

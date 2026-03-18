@@ -3,7 +3,10 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
-from .csi_processor import ProcessedCSI
+try:
+    from .csi_processor import ProcessedCSI
+except ImportError:
+    from csi_processor import ProcessedCSI
 
 
 class DetectionEvent(BaseModel):
