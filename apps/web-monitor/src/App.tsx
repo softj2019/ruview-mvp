@@ -1,6 +1,9 @@
 import { useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import DashboardPage from './pages/DashboardPage';
+import DevicesPage from './pages/DevicesPage';
+import EventsPage from './pages/EventsPage';
+import SettingsPage from './pages/SettingsPage';
 import Layout from './components/Layout';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore } from '@/stores/deviceStore';
@@ -52,6 +55,9 @@ export default function App() {
       <Routes>
         <Route element={<Layout />}>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/devices" element={<DevicesPage />} />
+          <Route path="/events" element={<EventsPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>
     </DataProvider>
