@@ -1,5 +1,6 @@
 import asyncio
 import json
+import math
 import os
 import struct
 from contextlib import asynccontextmanager
@@ -112,6 +113,34 @@ class SignalAdapterRuntime:
             total = sum(non_zero) // nodes_with_presence + 1
         return total
 
+    def _estimate_presence_from_csi(self) -> int:
+        """Fallback person-count estimate when vitals counts are unavailable."""
+        online_nodes = [
+            d for d in self.devices.values()
+            if d.get("status") == "online"
+        ]
+        if not online_nodes:
+            return 0
+
+        motions = [d.get("motion_energy", 0) for d in online_nodes]
+        nodes_with_presence = sum(1 for m in motions if m > 0.02)
+        total_motion = sum(m for m in motions if m > 0.02)
+
+        if nodes_with_presence == 0:
+            return 0
+
+        # Each person contributes roughly 0.5-2.0 motion per detecting node.
+        # Use a log curve so stronger motion increases the estimate without
+        # scaling linearly into unrealistic counts.
+        return max(1, round(math.log2(1 + total_motion) * nodes_with_presence / 2))
+
+    def _recompute_presence_count(self) -> int:
+        """Prefer explicit vitals counts, otherwise fall back to CSI motion."""
+        fused = self._fuse_person_count()
+        if fused > 0:
+            return fused
+        return self._estimate_presence_from_csi()
+
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
         if device_id not in self.devices:
@@ -154,7 +183,7 @@ class SignalAdapterRuntime:
         if changed:
             await self.broadcast_devices()
             if not self.zones[0].get("_manual_override"):
-                self.zones[0]["presenceCount"] = self._fuse_person_count()
+                self.zones[0]["presenceCount"] = self._recompute_presence_count()
                 await self.broadcast_zones()
 
     async def broadcast_devices(self) -> None:
@@ -224,32 +253,8 @@ class SignalAdapterRuntime:
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.motion_index
 
-        # CSI-based presence estimation from motion_index.
-        # Typical motion_index values:
-        #   empty room: < 0.02
-        #   1 person sitting still: 0.05 - 0.5
-        #   1 person moving: 1.0 - 10.0
-        #   multiple people: higher variance across nodes
         if not self.zones[0].get("_manual_override"):
-            online_nodes = [
-                d for d in self.devices.values()
-                if d.get("status") == "online"
-            ]
-            if online_nodes:
-                motions = [d.get("motion_energy", 0) for d in online_nodes]
-                nodes_with_presence = sum(1 for m in motions if m > 0.02)
-                total_motion = sum(m for m in motions if m > 0.02)
-
-                if nodes_with_presence == 0:
-                    estimated = 0
-                else:
-                    # Each person contributes ~0.5-2.0 motion per detecting node.
-                    # Use log scale: motion grows sublinearly with person count.
-                    import math
-                    estimated = max(1, round(math.log2(1 + total_motion) * nodes_with_presence / 2))
-                self.zones[0]["presenceCount"] = estimated
-            else:
-                self.zones[0]["presenceCount"] = 0
+            self.zones[0]["presenceCount"] = self._recompute_presence_count()
 
         await self.broadcast_devices()
         await self.broadcast_zones()
@@ -283,7 +288,7 @@ class SignalAdapterRuntime:
         # Multi-node fusion: aggregate person estimates from all nodes
         # Skip if manual override is active
         if not self.zones[0].get("_manual_override"):
-            self.zones[0]["presenceCount"] = self._fuse_person_count()
+            self.zones[0]["presenceCount"] = self._recompute_presence_count()
         self.zones[0]["lastActivity"] = iso_now()
         await self.broadcast_devices()
         await self.broadcast_zones()
@@ -412,7 +417,7 @@ async def set_presence_count(body: dict):
 async def clear_presence_override():
     """Clear manual override, return to sensor fusion mode."""
     runtime.zones[0].pop("_manual_override", None)
-    runtime.zones[0]["presenceCount"] = runtime._fuse_person_count()
+    runtime.zones[0]["presenceCount"] = runtime._recompute_presence_count()
     await runtime.broadcast_zones()
     return {"presenceCount": runtime.zones[0]["presenceCount"], "mode": "fusion"}
 

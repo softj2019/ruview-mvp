@@ -441,6 +441,8 @@ class Observatory {
       devices: new Map(),
       zones: [],
       lastSignal: null,
+      lastVitals: null,
+      lastVitalsAt: 0,
       lastEvent: null,
       lastUpdateAt: 0,
     };
@@ -470,6 +472,7 @@ class Observatory {
       this._liveState.lastSignal = payload;
     } else if (type === 'vitals') {
       this._liveState.lastVitals = payload;
+      this._liveState.lastVitalsAt = Date.now();
     } else if (type === 'event') {
       this._liveState.lastEvent = payload;
     } else {
@@ -534,6 +537,10 @@ class Observatory {
     const devices = this._snapshotDevices();
     const onlineDevices = devices.filter((device) => device.status !== 'offline');
     const lastSignal = this._liveState.lastSignal;
+    const vitalsTtlMs = 15000;
+    const lastVitals = Date.now() - (this._liveState.lastVitalsAt || 0) <= vitalsTtlMs
+      ? this._liveState.lastVitals
+      : null;
     const lastEvent = this._liveState.lastEvent;
     const latestDeviceId = lastSignal?.device_id || lastEvent?.deviceId || onlineDevices[0]?.id || null;
     const meanRssi = devices.length > 0
@@ -558,7 +565,7 @@ class Observatory {
       source: 'hardware',
       scenario,
       nodes: devices.map((device, index) => ({
-        node_id: index + 1,
+        node_id: Number.parseInt(String(device.id).replace(/^node-/, ''), 10) || index + 1,
         rssi_dbm: device.signalStrength ?? -65,
         position: [device.x || 0, 0, device.y || 0],
         amplitude: new Float32Array(64),
@@ -581,10 +588,10 @@ class Observatory {
       },
       signal_field: this._buildSignalFieldData(personCount),
       vital_signs: {
-        breathing_rate_bpm: this._liveState.lastVitals?.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
-        heart_rate_bpm: this._liveState.lastVitals?.heart_rate_bpm || (personCount > 0 ? 76 : 0),
-        breathing_confidence: this._liveState.lastVitals ? 0.7 : (personCount > 0 ? 0.55 : 0),
-        heart_rate_confidence: this._liveState.lastVitals ? 0.5 : (personCount > 0 ? 0.35 : 0),
+        breathing_rate_bpm: lastVitals?.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
+        heart_rate_bpm: lastVitals?.heart_rate_bpm || (personCount > 0 ? 76 : 0),
+        breathing_confidence: lastVitals ? 0.7 : (personCount > 0 ? 0.55 : 0),
+        heart_rate_confidence: lastVitals ? 0.5 : (personCount > 0 ? 0.35 : 0),
       },
       persons,
       estimated_persons: personCount,
