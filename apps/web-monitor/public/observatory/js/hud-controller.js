@@ -381,10 +381,14 @@ export class HudController {
 
     // Sync scenario dropdown
     const quickSel = document.getElementById('scenario-quick-select');
-    const cur = demoData._autoMode ? 'auto' : demoData.currentScenario;
-    if (quickSel && quickSel.value !== cur) quickSel.value = cur;
+    const isLive = data?.source === 'hardware';
+    const cur = isLive ? (data.scenario || 'auto') : (demoData._autoMode ? 'auto' : demoData.currentScenario);
+    if (quickSel) {
+      quickSel.disabled = isLive;
+      if (quickSel.value !== cur) quickSel.value = cur;
+    }
     const autoIcon = document.getElementById('autoplay-icon');
-    if (autoIcon) autoIcon.className = demoData._autoMode ? '' : 'hidden';
+    if (autoIcon) autoIcon.className = (!isLive && demoData._autoMode) ? '' : 'hidden';
 
     const targetHr = vs.heart_rate_bpm || 0;
     const targetBr = vs.breathing_rate_bpm || 0;
@@ -439,7 +443,7 @@ export class HudController {
     if (fallEl) fallEl.style.display = cls.fall_detected ? 'block' : 'none';
 
     // Scenario description and edge modules
-    const scenarioKey = demoData._autoMode ? (demoData.currentScenario || 'auto') : (demoData.currentScenario || 'auto');
+    const scenarioKey = isLive ? (data.scenario || 'auto') : (demoData._autoMode ? (demoData.currentScenario || 'auto') : (demoData.currentScenario || 'auto'));
     if (scenarioKey !== this._currentScenarioKey) {
       this._currentScenarioKey = scenarioKey;
       this._updateScenarioDescription(scenarioKey);

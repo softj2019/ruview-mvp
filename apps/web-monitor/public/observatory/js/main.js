@@ -130,6 +130,7 @@ class Observatory {
     // WebSocket for live data — always try auto-detect on startup
     this._ws = null;
     this._liveData = null;
+    this._liveState = this._createLiveState();
     this._autoDetectLive();
 
     // Input
@@ -435,11 +436,147 @@ class Observatory {
 
   // ---- WebSocket live data ----
 
+  _createLiveState() {
+    return {
+      devices: new Map(),
+      zones: [],
+      lastSignal: null,
+      lastEvent: null,
+      lastUpdateAt: 0,
+    };
+  }
+
+  _resetLiveState() {
+    this._liveState = this._createLiveState();
+    this._liveData = null;
+  }
+
+  _snapshotDevices() {
+    return Array.from(this._liveState.devices.values());
+  }
+
+  _applyLiveMessage(message) {
+    if (!message || typeof message !== 'object') return;
+
+    const { type, payload = {} } = message;
+    if (type === 'init') {
+      this._liveState.devices = new Map((payload.devices || []).map((device) => [device.id, device]));
+      this._liveState.zones = payload.zones || [];
+    } else if (type === 'device_update') {
+      this._liveState.devices = new Map((payload.devices || []).map((device) => [device.id, device]));
+    } else if (type === 'zone_update') {
+      this._liveState.zones = payload.zones || [];
+    } else if (type === 'signal') {
+      this._liveState.lastSignal = payload;
+    } else if (type === 'event') {
+      this._liveState.lastEvent = payload;
+    } else {
+      return;
+    }
+
+    this._liveState.lastUpdateAt = Date.now();
+    this._liveData = this._buildLiveFrame();
+  }
+
+  _deviceToPerson(device, index, latestDeviceId) {
+    const xSlots = [-2.8, 2.8, -1.4, 1.4, 0, 0];
+    const zSlots = [-1.8, -1.8, 1.8, 1.8, -3.2, 3.2];
+    const x = xSlots[index % xSlots.length];
+    const z = zSlots[index % zSlots.length];
+    const signalStrength = device.signalStrength ?? -60;
+    const motionScore = latestDeviceId === device.id ? 85 : 18;
+    return {
+      id: device.id,
+      position: [x, 0, z],
+      motion_score: motionScore,
+      pose: motionScore > 50 ? 'walking' : 'standing',
+      facing: index % 2 === 0 ? Math.PI * 0.15 : Math.PI * 0.85,
+      signal_strength: signalStrength,
+    };
+  }
+
+  _buildSignalField(personCount) {
+    const values = [];
+    for (let iz = 0; iz < 20; iz++) {
+      for (let ix = 0; ix < 20; ix++) {
+        const nx = (ix - 10) / 10;
+        const nz = (iz - 10) / 10;
+        const radius = Math.sqrt(nx * nx + nz * nz);
+        const intensity = Math.max(0.04, personCount * 0.08 - radius * 0.03);
+        values.push(intensity);
+      }
+    }
+    return { grid_size: [20, 1, 20], values };
+  }
+
+  _buildLiveFrame() {
+    const devices = this._snapshotDevices();
+    const onlineDevices = devices.filter((device) => device.status !== 'offline');
+    const lastSignal = this._liveState.lastSignal;
+    const lastEvent = this._liveState.lastEvent;
+    const latestDeviceId = lastSignal?.device_id || lastEvent?.deviceId || onlineDevices[0]?.id || null;
+    const persons = onlineDevices.map((device, index) => this._deviceToPerson(device, index, latestDeviceId));
+    const meanRssi = devices.length > 0
+      ? devices.reduce((sum, device) => sum + (device.signalStrength ?? -65), 0) / devices.length
+      : -65;
+    const motionIndex = lastSignal?.motion_index ?? (onlineDevices.length > 0 ? 0.12 : 0);
+    const personCount = Math.max(this._liveState.zones[0]?.presenceCount || 0, onlineDevices.length);
+    const hasFall = lastEvent?.type === 'fall_suspected';
+    const scenario = hasFall
+      ? 'fall_event'
+      : personCount >= 2
+        ? 'two_walking'
+        : personCount === 1
+          ? 'single_breathing'
+          : 'empty_room';
+
+    return {
+      type: 'sensing_update',
+      timestamp: Date.now() / 1000,
+      source: 'hardware',
+      scenario,
+      nodes: devices.map((device, index) => ({
+        node_id: index + 1,
+        rssi_dbm: device.signalStrength ?? -65,
+        position: [device.x || 0, 0, device.y || 0],
+        amplitude: new Float32Array(64),
+        subcarrier_count: 64,
+      })),
+      features: {
+        mean_rssi: meanRssi,
+        variance: Math.max(0.05, Math.abs(motionIndex) * 0.8),
+        std: Math.max(0.1, Math.abs(motionIndex) * 0.5),
+        motion_band_power: Math.max(0, motionIndex),
+        breathing_band_power: personCount > 0 ? 0.08 : 0,
+        dominant_freq_hz: personCount > 0 ? 0.23 : 0.02,
+        spectral_power: Math.max(0.02, Math.abs(motionIndex) * 0.9),
+      },
+      classification: {
+        motion_level: motionIndex > 0.15 ? 'active' : (personCount > 0 ? 'present_still' : 'absent'),
+        presence: personCount > 0,
+        confidence: personCount > 0 ? 0.92 : 0.75,
+        fall_detected: hasFall,
+      },
+      signal_field: this._buildSignalField(personCount),
+      vital_signs: {
+        breathing_rate_bpm: personCount > 0 ? 15 : 0,
+        heart_rate_bpm: personCount > 0 ? 76 : 0,
+        breathing_confidence: personCount > 0 ? 0.55 : 0,
+        heart_rate_confidence: personCount > 0 ? 0.35 : 0,
+      },
+      persons,
+      estimated_persons: personCount,
+      edge_modules: {},
+      _observatory: { subcarrier_iq: [], per_subcarrier_variance: new Float32Array(64).fill(0.02) },
+    };
+  }
+
   _autoDetectLive() {
     // Probe sensing server health on same origin, then common ports
     const host = window.location.hostname || 'localhost';
     const candidates = [
       window.location.origin,                   // same origin (e.g. :3000)
+      `http://${host}:8001`,                     // RuView signal adapter
       `http://${host}:8765`,                     // default WS port
       `http://${host}:3000`,                     // default HTTP port
     ];
@@ -458,8 +595,11 @@ class Observatory {
           if (data && data.status === 'ok') {
             const wsProto = base.startsWith('https') ? 'wss:' : 'ws:';
             const urlObj = new URL(base);
-            const wsUrl = `${wsProto}//${urlObj.host}/ws/sensing`;
+            const wsUrl = `${wsProto}//${urlObj.host}/ws/events`;
+            /*
             console.log('[Observatory] Sensing server detected at', base, '→', wsUrl);
+            */
+            console.log('[Observatory] Sensing server detected at', base, '->', wsUrl);
             this.settings.dataSource = 'ws';
             this.settings.wsUrl = wsUrl;
             this._connectWS(wsUrl);
@@ -480,11 +620,16 @@ class Observatory {
         console.log('[Observatory] WebSocket connected');
         this._hud.updateSourceBadge('ws', this._ws);
       };
-      this._ws.onmessage = (evt) => { try { this._liveData = JSON.parse(evt.data); } catch {} };
+      this._ws.onmessage = (evt) => {
+        try {
+          this._applyLiveMessage(JSON.parse(evt.data));
+        } catch {}
+      };
       this._ws.onclose = () => {
         console.log('[Observatory] WebSocket closed, falling back to demo');
         this._ws = null;
         this.settings.dataSource = 'demo';
+        this._resetLiveState();
         this._hud.updateSourceBadge('demo', null);
       };
       this._ws.onerror = () => {};
@@ -493,7 +638,7 @@ class Observatory {
 
   _disconnectWS() {
     if (this._ws) { this._ws.close(); this._ws = null; }
-    this._liveData = null;
+    this._resetLiveState();
   }
 
   // ========================================
@@ -516,7 +661,7 @@ class Observatory {
     // Updates
     this._nebula.update(dt, elapsed);
     this._figurePool.update(data, elapsed);
-    this._scenarioProps.update(data, this._demoData.currentScenario);
+    this._scenarioProps.update(data, data?.scenario || this._demoData.currentScenario);
     this._updateDotMatrixMist(data, elapsed);
     this._updateParticleTrail(data, dt, elapsed);
     this._updateWifiWaves(elapsed);
