@@ -21,8 +21,8 @@ load_dotenv(ROOT / ".env")
 DEFAULT_PORTS = os.getenv("ESP_PORTS", "")
 DEFAULT_BAUD = os.getenv("ESP_BAUD", "460800")
 DEFAULT_TARGET_PORT = os.getenv("ESP_TARGET_PORT", "5005")
-WIFI_SSID = os.getenv("WIFI_SSID", "")
-WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "")
+DEFAULT_WIFI_SSID = os.getenv("WIFI_SSID", "")
+DEFAULT_WIFI_PASSWORD = os.getenv("WIFI_PASSWORD", "")
 PROVISION_SCRIPT = ROOT / "vendor" / "ruview-temp" / "firmware" / "esp32-csi-node" / "provision.py"
 
 
@@ -53,7 +53,7 @@ def detect_ports():
     return ports
 
 
-def run_provision(port, node_id, slot, total, target_ip, baud, target_port):
+def run_provision(port, node_id, slot, total, target_ip, baud, target_port, wifi_ssid, wifi_password):
     """Provision a single board with node-specific settings."""
     cmd = [
         "python",
@@ -63,9 +63,9 @@ def run_provision(port, node_id, slot, total, target_ip, baud, target_port):
         "--baud",
         str(baud),
         "--ssid",
-        WIFI_SSID,
+        wifi_ssid,
         "--password",
-        WIFI_PASSWORD,
+        wifi_password,
         "--target-ip",
         target_ip,
         "--target-port",
@@ -85,13 +85,18 @@ def run_provision(port, node_id, slot, total, target_ip, baud, target_port):
 def main():
     parser = argparse.ArgumentParser(description="Provision all connected ESP32-S3 boards")
     parser.add_argument("--ports", help="Comma-separated serial ports, for example COM5,COM6")
+    parser.add_argument("--ssid", help="Wi-Fi SSID override")
+    parser.add_argument("--password", help="Wi-Fi password override")
     parser.add_argument("--target-ip", help="Aggregator IP address override")
     parser.add_argument("--target-port", type=int, default=int(DEFAULT_TARGET_PORT))
     parser.add_argument("--start-node-id", type=int, default=1)
     parser.add_argument("--baud", type=int, default=int(DEFAULT_BAUD))
     args = parser.parse_args()
 
-    if not WIFI_SSID:
+    wifi_ssid = args.ssid if args.ssid is not None else DEFAULT_WIFI_SSID
+    wifi_password = args.password if args.password is not None else DEFAULT_WIFI_PASSWORD
+
+    if not wifi_ssid:
         raise SystemExit("WIFI_SSID is not set in .env")
     if not PROVISION_SCRIPT.exists():
         raise SystemExit(f"Missing provision script: {PROVISION_SCRIPT}")
@@ -105,7 +110,7 @@ def main():
     target_ip = args.target_ip or detect_target_ip()
     total = len(ports)
 
-    print(f"Provisioning {total} ESP32-S3 device(s) to Wi-Fi '{WIFI_SSID}'")
+    print(f"Provisioning {total} ESP32-S3 device(s) to Wi-Fi '{wifi_ssid}'")
     print(f"Target: {target_ip}:{args.target_port}")
 
     for index, port in enumerate(ports):
@@ -119,6 +124,8 @@ def main():
             target_ip=target_ip,
             baud=args.baud,
             target_port=args.target_port,
+            wifi_ssid=wifi_ssid,
+            wifi_password=wifi_password,
         )
 
     print("\nDone.")
