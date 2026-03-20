@@ -468,6 +468,8 @@ class Observatory {
       this._liveState.zones = payload.zones || [];
     } else if (type === 'signal') {
       this._liveState.lastSignal = payload;
+    } else if (type === 'vitals') {
+      this._liveState.lastVitals = payload;
     } else if (type === 'event') {
       this._liveState.lastEvent = payload;
     } else {
@@ -579,10 +581,10 @@ class Observatory {
       },
       signal_field: this._buildSignalFieldData(personCount),
       vital_signs: {
-        breathing_rate_bpm: personCount > 0 ? 15 : 0,
-        heart_rate_bpm: personCount > 0 ? 76 : 0,
-        breathing_confidence: personCount > 0 ? 0.55 : 0,
-        heart_rate_confidence: personCount > 0 ? 0.35 : 0,
+        breathing_rate_bpm: this._liveState.lastVitals?.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
+        heart_rate_bpm: this._liveState.lastVitals?.heart_rate_bpm || (personCount > 0 ? 76 : 0),
+        breathing_confidence: this._liveState.lastVitals ? 0.7 : (personCount > 0 ? 0.55 : 0),
+        heart_rate_confidence: this._liveState.lastVitals ? 0.5 : (personCount > 0 ? 0.35 : 0),
       },
       persons,
       estimated_persons: personCount,

@@ -49,6 +49,9 @@ function DataProvider({ children }: { children: React.ReactNode }) {
         case 'zone_update':
           if (msg.payload.zones) setZones(msg.payload.zones as never[]);
           break;
+        case 'vitals':
+          addSignalPoint(msg.payload as never);
+          break;
       }
     },
     [setDevices, setZones, addEvent, addSignalPoint],

@@ -224,19 +224,29 @@ class SignalAdapterRuntime:
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.motion_index
 
-        # CSI-based presence: motion_index > 0.05 indicates human presence
-        # (sitting still produces very low motion, ~0.01-0.1)
+        # CSI-based presence estimation from motion_index.
+        # Typical motion_index values:
+        #   empty room: < 0.02
+        #   1 person sitting still: 0.05 - 0.5
+        #   1 person moving: 1.0 - 10.0
+        #   multiple people: higher variance across nodes
         if not self.zones[0].get("_manual_override"):
-            active_nodes = [
+            online_nodes = [
                 d for d in self.devices.values()
-                if d.get("status") == "online" and d.get("motion_energy", 0) > 0.05
+                if d.get("status") == "online"
             ]
-            # Estimate persons from number of nodes detecting motion
-            # and average motion energy across nodes
-            if active_nodes:
-                avg_motion = sum(d.get("motion_energy", 0) for d in active_nodes) / len(active_nodes)
-                # Higher motion across more nodes = more people
-                estimated = max(1, int(avg_motion * len(active_nodes) / 2))
+            if online_nodes:
+                motions = [d.get("motion_energy", 0) for d in online_nodes]
+                nodes_with_presence = sum(1 for m in motions if m > 0.02)
+                total_motion = sum(m for m in motions if m > 0.02)
+
+                if nodes_with_presence == 0:
+                    estimated = 0
+                else:
+                    # Each person contributes ~0.5-2.0 motion per detecting node.
+                    # Use log scale: motion grows sublinearly with person count.
+                    import math
+                    estimated = max(1, round(math.log2(1 + total_motion) * nodes_with_presence / 2))
                 self.zones[0]["presenceCount"] = estimated
             else:
                 self.zones[0]["presenceCount"] = 0
@@ -263,10 +273,12 @@ class SignalAdapterRuntime:
         device["signalStrength"] = rssi
         device["lastSeen"] = iso_now()
 
-        # Track per-node person count for multi-node fusion
+        # Track per-node vitals
         device["n_persons"] = n_persons
         device["presence_score"] = presence_score
         device["motion_energy"] = motion_energy
+        device["breathing_bpm"] = breathing_bpm
+        device["heart_rate"] = heart_rate
 
         # Multi-node fusion: aggregate person estimates from all nodes
         # Skip if manual override is active
@@ -276,13 +288,17 @@ class SignalAdapterRuntime:
         await self.broadcast_devices()
         await self.broadcast_zones()
 
-        metadata = {
-            "breathing_bpm": breathing_bpm,
-            "heart_rate": heart_rate,
+        # Broadcast vitals to all WS clients (observatory, dashboard)
+        vitals_payload = {
+            "device_id": self.device_key(node_id),
+            "breathing_rate_bpm": breathing_bpm,
+            "heart_rate_bpm": heart_rate,
             "motion_energy": motion_energy,
             "presence_score": presence_score,
+            "n_persons": n_persons,
             "flags": flags,
         }
+        await self.broadcast("vitals", vitals_payload)
 
         if flags & 0x02:
             event_payload = {

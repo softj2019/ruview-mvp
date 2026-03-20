@@ -106,7 +106,7 @@ const OVERSHOOT = [
   0.06, // 16 right ankle
 ];
 
-const MAX_FIGURES = 10;
+const MAX_FIGURES = 4;
 
 // Reusable vectors to avoid per-frame allocation
 const _vecFrom = new THREE.Vector3();
