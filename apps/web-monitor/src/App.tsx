@@ -50,7 +50,7 @@ function DataProvider({ children }: { children: React.ReactNode }) {
           if (msg.payload.zones) setZones(msg.payload.zones as never[]);
           break;
         case 'vitals':
-          addSignalPoint(msg.payload as never);
+          // vitals payload does not match SignalPoint schema; observatory consumes it via its own WS
           break;
       }
     },

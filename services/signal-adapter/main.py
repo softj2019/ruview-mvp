@@ -309,7 +309,7 @@ class SignalAdapterRuntime:
                 "deviceId": self.device_key(node_id),
                 "confidence": min(max(motion_energy / 5.0, 0.6), 0.99),
                 "timestamp": iso_now(),
-                "metadata": metadata,
+                "metadata": vitals_payload,
             }
             await self.broadcast("event", event_payload)
 
