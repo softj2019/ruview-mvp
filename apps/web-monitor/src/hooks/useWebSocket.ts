@@ -21,7 +21,7 @@ export function useWebSocket({
 }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const attemptsRef = useRef(0);
-  const timerRef = useRef<ReturnType<typeof setTimeout>>();
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callbacksRef = useRef({ onMessage, onOpen, onClose, onError });
 
   // Update callbacks ref without triggering reconnect
@@ -72,7 +72,9 @@ export function useWebSocket({
   useEffect(() => {
     connect();
     return () => {
-      clearTimeout(timerRef.current);
+      if (timerRef.current !== null) {
+        clearTimeout(timerRef.current);
+      }
       wsRef.current?.close();
     };
   }, [connect]);
