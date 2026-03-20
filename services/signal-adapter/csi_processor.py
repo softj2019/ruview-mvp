@@ -68,5 +68,10 @@ class CSIProcessor:
         buf = self._amplitude_buffer.get(device_id, [])
         if len(buf) < 5:
             return 0.0
-        arr = np.array(buf[-10:])
+        # Normalize to same length (min across recent frames)
+        recent = buf[-10:]
+        min_len = min(len(a) for a in recent)
+        if min_len == 0:
+            return 0.0
+        arr = np.array([a[:min_len] for a in recent])
         return float(np.std(arr))

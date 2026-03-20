@@ -224,11 +224,12 @@ class SignalAdapterRuntime:
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.motion_index
 
-        # CSI-based presence: motion_index > 0.5 indicates human presence
+        # CSI-based presence: motion_index > 0.05 indicates human presence
+        # (sitting still produces very low motion, ~0.01-0.1)
         if not self.zones[0].get("_manual_override"):
             active_nodes = [
                 d for d in self.devices.values()
-                if d.get("status") == "online" and d.get("motion_energy", 0) > 0.5
+                if d.get("status") == "online" and d.get("motion_energy", 0) > 0.05
             ]
             # Estimate persons from number of nodes detecting motion
             # and average motion energy across nodes
