@@ -495,7 +495,7 @@ class Observatory {
     };
   }
 
-  _buildSignalField(personCount) {
+  _buildSignalFieldData(personCount) {
     const values = [];
     for (let iz = 0; iz < 20; iz++) {
       for (let ix = 0; ix < 20; ix++) {
@@ -557,7 +557,7 @@ class Observatory {
         confidence: personCount > 0 ? 0.92 : 0.75,
         fall_detected: hasFall,
       },
-      signal_field: this._buildSignalField(personCount),
+      signal_field: this._buildSignalFieldData(personCount),
       vital_signs: {
         breathing_rate_bpm: personCount > 0 ? 15 : 0,
         heart_rate_bpm: personCount > 0 ? 76 : 0,
