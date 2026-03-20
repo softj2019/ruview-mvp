@@ -131,6 +131,7 @@ class Observatory {
     this._ws = null;
     this._liveData = null;
     this._liveState = this._createLiveState();
+    this._autoDetecting = true;
     this._autoDetectLive();
 
     // Input
@@ -601,11 +602,11 @@ class Observatory {
   }
 
   _autoDetectLive() {
-    // Probe sensing server health on same origin, then common ports
+    // Probe sensing server health — prioritize signal-adapter port
     const host = window.location.hostname || 'localhost';
     const candidates = [
-      window.location.origin,                   // same origin (e.g. :3000)
-      `http://${host}:8001`,                     // RuView signal adapter
+      `http://${host}:8001`,                     // RuView signal adapter (priority)
+      window.location.origin,                   // same origin (vite proxy)
       `http://${host}:8765`,                     // default WS port
       `http://${host}:3000`,                     // default HTTP port
     ];
@@ -615,6 +616,7 @@ class Observatory {
     const tryNext = (i) => {
       if (i >= unique.length) {
         console.log('[Observatory] No sensing server detected, using demo mode');
+        this._autoDetecting = false;
         return;
       }
       const base = unique[i];
@@ -631,6 +633,7 @@ class Observatory {
             console.log('[Observatory] Sensing server detected at', base, '->', wsUrl);
             this.settings.dataSource = 'ws';
             this.settings.wsUrl = wsUrl;
+            this._autoDetecting = false;
             this._connectWS(wsUrl);
           } else {
             tryNext(i + 1);
@@ -655,11 +658,14 @@ class Observatory {
         } catch {}
       };
       this._ws.onclose = () => {
-        console.log('[Observatory] WebSocket closed, falling back to demo');
         this._ws = null;
-        this.settings.dataSource = 'demo';
-        this._resetLiveState();
-        this._hud.updateSourceBadge('demo', null);
+        // Don't fall back to demo if auto-detect is still running
+        if (!this._autoDetecting) {
+          console.log('[Observatory] WebSocket closed, falling back to demo');
+          this.settings.dataSource = 'demo';
+          this._resetLiveState();
+          this._hud.updateSourceBadge('demo', null);
+        }
       };
       this._ws.onerror = () => {};
     } catch {}
