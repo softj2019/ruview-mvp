@@ -10,6 +10,9 @@ export interface Device {
   signalStrength: number | null;
   lastSeen: string;
   firmwareVersion: string;
+  motion_energy?: number;
+  presence_score?: number;
+  n_persons?: number;
 }
 
 interface DeviceState {

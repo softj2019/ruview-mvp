@@ -485,14 +485,33 @@ class Observatory {
     const z = zSlots[index % zSlots.length];
     const signalStrength = device.signalStrength ?? -60;
     const motionScore = latestDeviceId === device.id ? 85 : 18;
+    const pose = motionScore > 50 ? 'walking' : (motionScore > 30 ? 'standing' : 'sitting');
     return {
       id: device.id,
       position: [x, 0, z],
       motion_score: motionScore,
-      pose: motionScore > 50 ? 'walking' : 'standing',
+      pose,
       facing: index % 2 === 0 ? Math.PI * 0.15 : Math.PI * 0.85,
       signal_strength: signalStrength,
     };
+  }
+
+  _generateExtraPersons(count, startIndex) {
+    // Generate additional persons beyond detected devices based on presenceCount
+    const xSlots = [-2.0, 2.0, -0.7, 0.7, -2.4, 2.4, -1.5, 1.5, 0, -3.0];
+    const zSlots = [0, 0, -1.0, 1.0, -2.5, 2.5, 2.0, -2.0, -3.0, 1.5];
+    const persons = [];
+    for (let i = 0; i < count; i++) {
+      const idx = startIndex + i;
+      persons.push({
+        id: `p${idx}`,
+        position: [xSlots[idx % xSlots.length], 0, zSlots[idx % zSlots.length]],
+        motion_score: 10 + Math.round(Math.random() * 15),
+        pose: 'sitting',
+        facing: (idx * 0.7) % (Math.PI * 2),
+      });
+    }
+    return persons;
   }
 
   _buildSignalFieldData(personCount) {
@@ -515,12 +534,13 @@ class Observatory {
     const lastSignal = this._liveState.lastSignal;
     const lastEvent = this._liveState.lastEvent;
     const latestDeviceId = lastSignal?.device_id || lastEvent?.deviceId || onlineDevices[0]?.id || null;
-    const persons = onlineDevices.map((device, index) => this._deviceToPerson(device, index, latestDeviceId));
     const meanRssi = devices.length > 0
       ? devices.reduce((sum, device) => sum + (device.signalStrength ?? -65), 0) / devices.length
       : -65;
     const motionIndex = lastSignal?.motion_index ?? (onlineDevices.length > 0 ? 0.12 : 0);
-    const personCount = Math.max(this._liveState.zones[0]?.presenceCount || 0, onlineDevices.length);
+    const personCount = this._liveState.zones[0]?.presenceCount || 0;
+    // Generate persons based on presenceCount (CSI-detected people), not device count
+    const persons = this._generateExtraPersons(personCount, 0);
     const hasFall = lastEvent?.type === 'fall_suspected';
     const scenario = hasFall
       ? 'fall_event'

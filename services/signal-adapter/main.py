@@ -40,12 +40,10 @@ DEFAULT_ZONE = {
     "lastActivity": None,
 }
 DEVICE_POSITIONS = [
-    (140, 120),
-    (660, 120),
-    (140, 380),
-    (660, 380),
-    (400, 120),
-    (400, 380),
+    (140, 120),   # Node 1
+    (720, 80),    # Node 2
+    (140, 380),   # Node 3
+    (660, 380),   # Node 4
 ]
 CSI_MAGIC = 0xC5110001
 VITALS_MAGIC = 0xC5110002
@@ -87,6 +85,33 @@ class SignalAdapterRuntime:
     def device_position(self, node_id: int) -> tuple[int, int]:
         return DEVICE_POSITIONS[(node_id - 1) % len(DEVICE_POSITIONS)]
 
+    def _fuse_person_count(self) -> int:
+        """Fuse person count estimates from all online nodes.
+
+        Each node reports n_persons based on its local CSI analysis.
+        Since nodes observe overlapping areas, we use the median of
+        non-zero reports as the fused estimate, scaled by the number
+        of nodes reporting presence (more nodes = higher confidence
+        of more people spread across the space).
+        """
+        counts = []
+        for dev in self.devices.values():
+            if dev.get("status") == "online" and "n_persons" in dev:
+                counts.append(dev["n_persons"])
+        if not counts:
+            return 0
+        non_zero = [c for c in counts if c > 0]
+        if not non_zero:
+            return 0
+        # Use max of node estimates — each node sees its local area,
+        # people in different areas are counted by different nodes
+        total = max(non_zero)
+        # If multiple nodes report high counts, people may be spread out
+        nodes_with_presence = len(non_zero)
+        if nodes_with_presence >= 3 and total < sum(non_zero) // nodes_with_presence + 1:
+            total = sum(non_zero) // nodes_with_presence + 1
+        return total
+
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
         if device_id not in self.devices:
@@ -114,6 +139,23 @@ class SignalAdapterRuntime:
                 }
             )
         )
+
+    async def check_offline_devices(self) -> None:
+        """Mark devices as offline if no data received for 30 seconds."""
+        now = datetime.now(timezone.utc)
+        changed = False
+        for dev in self.devices.values():
+            last = datetime.fromisoformat(dev["lastSeen"])
+            delta = (now - last).total_seconds()
+            new_status = "online" if delta < 30 else "offline"
+            if dev["status"] != new_status:
+                dev["status"] = new_status
+                changed = True
+        if changed:
+            await self.broadcast_devices()
+            if not self.zones[0].get("_manual_override"):
+                self.zones[0]["presenceCount"] = self._fuse_person_count()
+                await self.broadcast_zones()
 
     async def broadcast_devices(self) -> None:
         await self.broadcast("device_update", {"devices": list(self.devices.values())})
@@ -177,9 +219,26 @@ class SignalAdapterRuntime:
         )
 
         self.zones[0]["lastActivity"] = processed.timestamp
-        self.zones[0]["presenceCount"] = len(
-            [item for item in self.devices.values() if item["status"] == "online"]
-        )
+
+        # Track per-device CSI motion for presence detection
+        device["motion_energy"] = processed.motion_index
+        device["presence_score"] = processed.motion_index
+
+        # CSI-based presence: motion_index > 0.5 indicates human presence
+        if not self.zones[0].get("_manual_override"):
+            active_nodes = [
+                d for d in self.devices.values()
+                if d.get("status") == "online" and d.get("motion_energy", 0) > 0.5
+            ]
+            # Estimate persons from number of nodes detecting motion
+            # and average motion energy across nodes
+            if active_nodes:
+                avg_motion = sum(d.get("motion_energy", 0) for d in active_nodes) / len(active_nodes)
+                # Higher motion across more nodes = more people
+                estimated = max(1, int(avg_motion * len(active_nodes) / 2))
+                self.zones[0]["presenceCount"] = estimated
+            else:
+                self.zones[0]["presenceCount"] = 0
 
         await self.broadcast_devices()
         await self.broadcast_zones()
@@ -203,7 +262,15 @@ class SignalAdapterRuntime:
         device["signalStrength"] = rssi
         device["lastSeen"] = iso_now()
 
-        self.zones[0]["presenceCount"] = max(self.zones[0]["presenceCount"], n_persons)
+        # Track per-node person count for multi-node fusion
+        device["n_persons"] = n_persons
+        device["presence_score"] = presence_score
+        device["motion_energy"] = motion_energy
+
+        # Multi-node fusion: aggregate person estimates from all nodes
+        # Skip if manual override is active
+        if not self.zones[0].get("_manual_override"):
+            self.zones[0]["presenceCount"] = self._fuse_person_count()
         self.zones[0]["lastActivity"] = iso_now()
         await self.broadcast_devices()
         await self.broadcast_zones()
@@ -251,6 +318,13 @@ class UDPProtocol(asyncio.DatagramProtocol):
         self.loop.create_task(runtime.route_datagram(data, addr))
 
 
+async def _offline_check_loop():
+    """Periodically check for offline devices."""
+    while True:
+        await asyncio.sleep(5)
+        await runtime.check_offline_devices()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
@@ -259,9 +333,11 @@ async def lifespan(app: FastAPI):
         local_addr=(UDP_HOST, UDP_PORT),
     )
     runtime.transport = transport
+    offline_task = asyncio.create_task(_offline_check_loop())
     print(f"[signal-adapter] Starting up on UDP {UDP_HOST}:{UDP_PORT}...")
     yield
     print("[signal-adapter] Shutting down...")
+    offline_task.cancel()
     if runtime.transport is not None:
         runtime.transport.close()
 
@@ -301,6 +377,27 @@ async def list_devices():
 @app.get("/api/zones")
 async def list_zones():
     return {"data": runtime.zones}
+
+
+@app.put("/api/zones/presence")
+async def set_presence_count(body: dict):
+    """Manually set presenceCount (overrides sensor fusion)."""
+    count = body.get("count")
+    if count is None or not isinstance(count, int) or count < 0:
+        raise HTTPException(status_code=400, detail="'count' must be a non-negative integer")
+    runtime.zones[0]["presenceCount"] = count
+    runtime.zones[0]["_manual_override"] = True
+    await runtime.broadcast_zones()
+    return {"presenceCount": count, "mode": "manual"}
+
+
+@app.delete("/api/zones/presence")
+async def clear_presence_override():
+    """Clear manual override, return to sensor fusion mode."""
+    runtime.zones[0].pop("_manual_override", None)
+    runtime.zones[0]["presenceCount"] = runtime._fuse_person_count()
+    await runtime.broadcast_zones()
+    return {"presenceCount": runtime.zones[0]["presenceCount"], "mode": "fusion"}
 
 
 @app.get("/api/scenario")
