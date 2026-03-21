@@ -114,7 +114,12 @@ class SignalAdapterRuntime:
         return total
 
     def _estimate_presence_from_csi(self) -> int:
-        """Fallback person-count estimate when vitals counts are unavailable."""
+        """Fallback person-count estimate when vitals counts are unavailable.
+
+        Uses an adaptive baseline: collects motion values for the first
+        60 seconds after startup, then estimates presence from the delta
+        above baseline.
+        """
         online_nodes = [
             d for d in self.devices.values()
             if d.get("status") == "online"
@@ -123,16 +128,47 @@ class SignalAdapterRuntime:
             return 0
 
         motions = [d.get("motion_energy", 0) for d in online_nodes]
-        nodes_with_presence = sum(1 for m in motions if m > 0.02)
-        total_motion = sum(m for m in motions if m > 0.02)
+
+        # Adaptive baseline calibration
+        if not hasattr(self, "_motion_baseline"):
+            self._motion_baseline = {}
+            self._motion_baseline_samples = {}
+            self._baseline_ready = False
+
+        for d in online_nodes:
+            did = d["id"]
+            m = d.get("motion_energy", 0)
+            if did not in self._motion_baseline_samples:
+                self._motion_baseline_samples[did] = []
+            samples = self._motion_baseline_samples[did]
+            if len(samples) < 60:  # ~60 samples for calibration
+                samples.append(m)
+                if len(samples) == 60:
+                    avg = sum(samples) / len(samples)
+                    std = (sum((x - avg) ** 2 for x in samples) / len(samples)) ** 0.5
+                    self._motion_baseline[did] = avg + 3 * std
+            # Check if all nodes calibrated
+            if all(len(self._motion_baseline_samples.get(d["id"], [])) >= 60 for d in online_nodes):
+                self._baseline_ready = True
+
+        if not self._baseline_ready:
+            return 0  # Still calibrating
+
+        # Count nodes with motion above their baseline
+        nodes_with_presence = 0
+        total_delta = 0.0
+        for d in online_nodes:
+            did = d["id"]
+            m = d.get("motion_energy", 0)
+            baseline = self._motion_baseline.get(did, 10.0)
+            if m > baseline:
+                nodes_with_presence += 1
+                total_delta += m - baseline
 
         if nodes_with_presence == 0:
             return 0
 
-        # Each person contributes roughly 0.5-2.0 motion per detecting node.
-        # Use a log curve so stronger motion increases the estimate without
-        # scaling linearly into unrealistic counts.
-        return max(1, round(math.log2(1 + total_motion) * nodes_with_presence / 2))
+        return max(1, round(math.log2(1 + total_delta) * nodes_with_presence / 2))
 
     def _recompute_presence_count(self) -> int:
         """Prefer explicit vitals counts, otherwise fall back to CSI motion."""
@@ -394,6 +430,33 @@ async def health():
 @app.get("/api/devices")
 async def list_devices():
     return {"data": list(runtime.devices.values())}
+
+
+@app.post("/api/camera/detections")
+async def camera_detections(body: dict):
+    """Receive detection results from camera-service for CSI+camera fusion."""
+    person_count = body.get("person_count", 0)
+    detections = body.get("detections", [])
+
+    # Store camera data for fusion
+    runtime.zones[0]["camera_person_count"] = person_count
+    runtime.zones[0]["camera_detections"] = detections
+
+    # Cross-validate: camera provides more accurate person count
+    if not runtime.zones[0].get("_manual_override") and person_count > 0:
+        csi_count = runtime._recompute_presence_count()
+        # Camera count is more reliable — use it, but keep CSI as minimum
+        fused = max(csi_count, person_count)
+        runtime.zones[0]["presenceCount"] = fused
+
+    # Broadcast camera detections to frontend
+    await runtime.broadcast("camera_detection", {
+        "detections": detections,
+        "person_count": person_count,
+    })
+    await runtime.broadcast_zones()
+
+    return {"status": "ok", "fused_count": runtime.zones[0]["presenceCount"]}
 
 
 @app.get("/api/zones")

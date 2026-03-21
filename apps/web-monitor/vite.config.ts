@@ -25,6 +25,10 @@ export default defineConfig({
         target: 'http://localhost:8001',
         changeOrigin: true,
       },
+      '/cam': {
+        target: 'http://localhost:8002',
+        changeOrigin: true,
+      },
     },
   },
 });

@@ -1,5 +1,6 @@
 import KpiCards from '@/components/charts/KpiCards';
 import FloorView from '@/components/floor/FloorView';
+import CameraFeed from '@/components/camera/CameraFeed';
 import ObservatoryMini from '@/components/observatory/ObservatoryMini';
 import AlertPanel from '@/components/alerts/AlertPanel';
 import DeviceList from '@/components/devices/DeviceList';
@@ -14,10 +15,13 @@ export default function DashboardPage() {
       </div>
       <KpiCards />
       <div className="grid grid-cols-12 gap-6">
-        <div className="col-span-12 lg:col-span-7">
+        <div className="col-span-12 lg:col-span-5">
           <FloorView />
         </div>
-        <div className="col-span-12 lg:col-span-5">
+        <div className="col-span-12 lg:col-span-4">
+          <CameraFeed />
+        </div>
+        <div className="col-span-12 lg:col-span-3">
           <ObservatoryMini />
         </div>
       </div>

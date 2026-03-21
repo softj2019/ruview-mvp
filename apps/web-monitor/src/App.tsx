@@ -52,6 +52,9 @@ function DataProvider({ children }: { children: React.ReactNode }) {
         case 'vitals':
           // vitals payload does not match SignalPoint schema; observatory consumes it via its own WS
           break;
+        case 'camera_detection':
+          // camera detections update zones via zone_update; no separate handling needed
+          break;
       }
     },
     [setDevices, setZones, addEvent, addSignalPoint],
