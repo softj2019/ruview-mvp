@@ -298,6 +298,31 @@ export default function FloorView() {
                 </text>
               )}
 
+              {/* Person count indicator */}
+              {device.status === 'online' && (device.n_persons ?? 0) > 0 && (
+                <>
+                  {Array.from({ length: Math.min(device.n_persons ?? 0, 8) }).map((_, pi) => {
+                    const angle = (pi / Math.min(device.n_persons ?? 1, 8)) * Math.PI * 2 - Math.PI / 2;
+                    const r = 35;
+                    const px = Math.cos(angle) * r;
+                    const py = Math.sin(angle) * r;
+                    return (
+                      <g key={pi} transform={`translate(${px},${py})`}>
+                        <circle r="6" fill="rgba(139,92,246,0.2)" stroke="#8b5cf6" strokeWidth="0.8" />
+                        <circle r="2" fill="#8b5cf6" cy="-2" />
+                        <line x1="0" y1="0" x2="0" y2="4" stroke="#8b5cf6" strokeWidth="1" />
+                      </g>
+                    );
+                  })}
+                  <g transform="translate(20,-20)">
+                    <rect x="-8" y="-6" width="16" height="12" rx="3" fill="#8b5cf6" opacity="0.9" />
+                    <text textAnchor="middle" dominantBaseline="middle" fill="#fff" fontSize="8" fontWeight="bold">
+                      {device.n_persons}
+                    </text>
+                  </g>
+                </>
+              )}
+
               {/* Coordinates (while dragging) */}
               {isDragging && (
                 <text y="28" textAnchor="middle" fill="#fbbf24" fontSize="7">

@@ -614,7 +614,7 @@ class Observatory {
     const unique = [...new Set(candidates)];
 
     console.log('[Observatory] Auto-detect candidates:', unique);
-    const tryNext = (i) => {
+    const tryNext = async (i) => {
       if (i >= unique.length) {
         console.log('[Observatory] No sensing server detected, using demo mode');
         this._autoDetecting = false;
@@ -622,30 +622,30 @@ class Observatory {
       }
       const base = unique[i];
       console.log(`[Observatory] Trying ${base}/health ...`);
-      fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) })
-        .then(r => {
-          console.log(`[Observatory] ${base} response: ${r.status}`);
-          return r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`);
-        })
-        .then(data => {
-          console.log(`[Observatory] ${base} data:`, data);
-          if (data && data.status === 'ok') {
-            const wsProto = base.startsWith('https') ? 'wss:' : 'ws:';
-            const urlObj = new URL(base);
-            const wsUrl = `${wsProto}//${urlObj.host}/ws/events`;
-            console.log('[Observatory] Sensing server detected at', base, '->', wsUrl);
-            this.settings.dataSource = 'ws';
-            this.settings.wsUrl = wsUrl;
-            this._autoDetecting = false;
-            this._connectWS(wsUrl);
-          } else {
-            tryNext(i + 1);
-          }
-        })
-        .catch((err) => {
-          console.log(`[Observatory] ${base} failed:`, err);
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 3000);
+        const r = await fetch(`${base}/health`, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!r.ok) { tryNext(i + 1); return; }
+        const text = await r.text();
+        const data = JSON.parse(text);
+        if (data && data.status === 'ok') {
+          const wsProto = base.startsWith('https') ? 'wss:' : 'ws:';
+          const urlObj = new URL(base);
+          const wsUrl = `${wsProto}//${urlObj.host}/ws/events`;
+          console.log('[Observatory] Live server found:', base, '->', wsUrl);
+          this.settings.dataSource = 'ws';
+          this.settings.wsUrl = wsUrl;
+          this._autoDetecting = false;
+          this._connectWS(wsUrl);
+        } else {
           tryNext(i + 1);
-        });
+        }
+      } catch (err) {
+        console.log(`[Observatory] ${base} failed:`, err.message || err);
+        tryNext(i + 1);
+      }
     };
     tryNext(0);
   }
