@@ -171,11 +171,28 @@ class SignalAdapterRuntime:
         return max(1, round(math.log2(1 + total_delta) * nodes_with_presence / 2))
 
     def _recompute_presence_count(self) -> int:
-        """Prefer explicit vitals counts, otherwise fall back to CSI motion."""
+        """Fuse vitals, breathing detection, and camera detections.
+
+        Priority:
+        1. Camera person count (most accurate when available)
+        2. Breathing detection (if breathing_bpm > 5, someone is there)
+        3. Vitals n_persons from firmware
+        4. CSI motion (least reliable in noisy WiFi environments)
+        """
+        camera = self.zones[0].get("camera_person_count", 0)
+
+        # Count nodes detecting breathing (most reliable CSI indicator)
+        nodes_breathing = sum(
+            1 for d in self.devices.values()
+            if d.get("status") == "online"
+            and d.get("breathing_bpm", 0) > 5
+        )
+
+        # Vitals n_persons from firmware
         fused = self._fuse_person_count()
-        if fused > 0:
-            return fused
-        return self._estimate_presence_from_csi()
+
+        # Use the highest confidence source
+        return max(camera, nodes_breathing, fused)
 
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
