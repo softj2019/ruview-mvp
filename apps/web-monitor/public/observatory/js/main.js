@@ -622,7 +622,7 @@ class Observatory {
       }
       const base = unique[i];
       console.log(`[Observatory] Trying ${base}/health ...`);
-      fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) })
+      fetch(`${base}/health`, { signal: AbortSignal.timeout(5000) })
         .then(r => {
           console.log(`[Observatory] ${base} response: ${r.status}`);
           return r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`);

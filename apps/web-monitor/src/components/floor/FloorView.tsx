@@ -148,11 +148,32 @@ export default function FloorView() {
         {devices.map((device) => {
           const motion = device.motion_energy ?? 0;
           const hasMotion = motion > 0.5;
+          const breathBpm = device.breathing_bpm;
+          const isBreathing = (breathBpm ?? 0) > 5;
           return (
             <g key={device.id} transform={`translate(${device.x},${device.y})`}>
               <circle r="80" fill="url(#coverage-grad)" />
+              {/* Breathing detection ring */}
+              {device.status === 'online' && isBreathing && (
+                <>
+                  <circle
+                    r="20"
+                    fill="rgba(244,63,94,0.12)"
+                    stroke="#f43f5e"
+                    strokeWidth="1"
+                    strokeOpacity="0.4"
+                    className="animate-pulse"
+                  />
+                  <circle
+                    r="4"
+                    fill="#f43f5e"
+                    className="animate-ping"
+                    opacity="0.6"
+                  />
+                </>
+              )}
               {/* Motion ring */}
-              {device.status === 'online' && hasMotion && (
+              {device.status === 'online' && hasMotion && !isBreathing && (
                 <circle
                   r={12 + motion * 3}
                   fill="none"
@@ -164,7 +185,7 @@ export default function FloorView() {
               )}
               <circle
                 r="6"
-                fill={device.status === 'online' ? (hasMotion ? '#fbbf24' : '#34d399') : '#4b5563'}
+                fill={device.status === 'online' ? (isBreathing ? '#f43f5e' : hasMotion ? '#fbbf24' : '#34d399') : '#4b5563'}
                 className={device.status === 'online' ? 'animate-pulse' : ''}
               />
               <text y="20" textAnchor="middle" fill="#9ca3af" fontSize="10">
@@ -172,7 +193,7 @@ export default function FloorView() {
               </text>
               {device.status === 'online' && (
                 <text y="32" textAnchor="middle" fill="#6b7280" fontSize="8">
-                  {device.signalStrength}dBm {motion > 0 ? `M:${motion.toFixed(1)}` : ''}
+                  {isBreathing ? `${breathBpm?.toFixed(0)} BPM` : `${device.signalStrength}dBm`}
                 </text>
               )}
             </g>

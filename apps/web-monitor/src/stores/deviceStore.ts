@@ -13,6 +13,8 @@ export interface Device {
   motion_energy?: number;
   presence_score?: number;
   n_persons?: number;
+  breathing_bpm?: number;
+  heart_rate?: number;
 }
 
 interface DeviceState {
