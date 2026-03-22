@@ -43,8 +43,8 @@ DEFAULT_ZONE = {
 DEVICE_POSITIONS = [
     (140, 120),   # Node 1
     (720, 80),    # Node 2
-    (140, 380),   # Node 3
-    (660, 380),   # Node 4
+    (660, 380),   # Node 3
+    (140, 380),   # Node 4
 ]
 CSI_MAGIC = 0xC5110001
 VITALS_MAGIC = 0xC5110002

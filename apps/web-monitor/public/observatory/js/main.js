@@ -613,6 +613,7 @@ class Observatory {
     // Deduplicate
     const unique = [...new Set(candidates)];
 
+    console.log('[Observatory] Auto-detect candidates:', unique);
     const tryNext = (i) => {
       if (i >= unique.length) {
         console.log('[Observatory] No sensing server detected, using demo mode');
@@ -620,16 +621,18 @@ class Observatory {
         return;
       }
       const base = unique[i];
+      console.log(`[Observatory] Trying ${base}/health ...`);
       fetch(`${base}/health`, { signal: AbortSignal.timeout(1500) })
-        .then(r => r.ok ? r.json() : Promise.reject())
+        .then(r => {
+          console.log(`[Observatory] ${base} response: ${r.status}`);
+          return r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`);
+        })
         .then(data => {
+          console.log(`[Observatory] ${base} data:`, data);
           if (data && data.status === 'ok') {
             const wsProto = base.startsWith('https') ? 'wss:' : 'ws:';
             const urlObj = new URL(base);
             const wsUrl = `${wsProto}//${urlObj.host}/ws/events`;
-            /*
-            console.log('[Observatory] Sensing server detected at', base, '→', wsUrl);
-            */
             console.log('[Observatory] Sensing server detected at', base, '->', wsUrl);
             this.settings.dataSource = 'ws';
             this.settings.wsUrl = wsUrl;
@@ -639,7 +642,10 @@ class Observatory {
             tryNext(i + 1);
           }
         })
-        .catch(() => tryNext(i + 1));
+        .catch((err) => {
+          console.log(`[Observatory] ${base} failed:`, err);
+          tryNext(i + 1);
+        });
     };
     tryNext(0);
   }
