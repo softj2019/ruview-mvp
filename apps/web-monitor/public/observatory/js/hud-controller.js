@@ -28,7 +28,7 @@ export const DEFAULTS = {
   scenario: 'auto', cycle: 30, dataSource: 'demo', wsUrl: '',
 };
 
-export const SETTINGS_VERSION = '6';
+export const SETTINGS_VERSION = '7';
 
 export const PRESETS = {
   foundation: {},
