@@ -5,9 +5,11 @@ Captures frames and writes JPEG to a shared file.
 import os
 import sys
 import time
-import cv2
 
+# Must be set BEFORE importing cv2
 os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
+
+import cv2
 
 FRAME_PATH = os.path.join(os.path.dirname(__file__), ".frame.jpg")
 DEVICE_INDEX = int(os.getenv("CAMERA_INDEX", "0"))
