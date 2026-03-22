@@ -41,10 +41,10 @@ DEFAULT_ZONE = {
     "lastActivity": None,
 }
 DEVICE_POSITIONS = [
-    (140, 120),   # Node 1
-    (720, 80),    # Node 2
-    (660, 380),   # Node 3
-    (140, 380),   # Node 4
+    (60, 330),    # Node 1 — 1001호 좌하
+    (60, 50),     # Node 2 — 좌상
+    (740, 50),    # Node 3 — 우상
+    (740, 330),   # Node 4 — 우하
 ]
 CSI_MAGIC = 0xC5110001
 VITALS_MAGIC = 0xC5110002
@@ -447,6 +447,21 @@ async def health():
 @app.get("/api/devices")
 async def list_devices():
     return {"data": list(runtime.devices.values())}
+
+
+@app.put("/api/devices/{device_id}/position")
+async def update_device_position(device_id: str, body: dict):
+    """Update device position on floor plan (drag-drop)."""
+    if device_id not in runtime.devices:
+        raise HTTPException(status_code=404, detail=f"Device {device_id} not found")
+    x = body.get("x")
+    y = body.get("y")
+    if x is None or y is None:
+        raise HTTPException(status_code=400, detail="x and y required")
+    runtime.devices[device_id]["x"] = int(x)
+    runtime.devices[device_id]["y"] = int(y)
+    await runtime.broadcast_devices()
+    return {"status": "ok", "x": int(x), "y": int(y)}
 
 
 @app.post("/api/camera/detections")
