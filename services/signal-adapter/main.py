@@ -171,28 +171,46 @@ class SignalAdapterRuntime:
         return max(1, round(math.log2(1 + total_delta) * nodes_with_presence / 2))
 
     def _recompute_presence_count(self) -> int:
-        """Fuse vitals, breathing detection, and camera detections.
+        """Fuse vitals n_persons, breathing changes, and camera.
 
-        Priority:
-        1. Camera person count (most accurate when available)
-        2. Breathing detection (if breathing_bpm > 5, someone is there)
-        3. Vitals n_persons from firmware
-        4. CSI motion (least reliable in noisy WiFi environments)
+        Empty rooms produce false breathing (16-25 BPM from WiFi noise).
+        Use adaptive breathing baseline: track per-node breathing BPM,
+        significant change from baseline indicates real person.
         """
         camera = self.zones[0].get("camera_person_count", 0)
-
-        # Count nodes detecting breathing (most reliable CSI indicator)
-        nodes_breathing = sum(
-            1 for d in self.devices.values()
-            if d.get("status") == "online"
-            and d.get("breathing_bpm", 0) > 5
-        )
-
-        # Vitals n_persons from firmware
         fused = self._fuse_person_count()
 
-        # Use the highest confidence source
-        return max(camera, nodes_breathing, fused)
+        # Adaptive breathing baseline
+        if not hasattr(self, "_breath_baseline"):
+            self._breath_baseline = {}
+            self._breath_samples = {}
+
+        nodes_with_real_breathing = 0
+        for dev in self.devices.values():
+            if dev.get("status") != "online":
+                continue
+            did = dev["id"]
+            bpm = dev.get("breathing_bpm", 0)
+            if bpm <= 0:
+                continue
+
+            # Collect baseline samples (first 30)
+            if did not in self._breath_samples:
+                self._breath_samples[did] = []
+            samples = self._breath_samples[did]
+            if len(samples) < 30:
+                samples.append(bpm)
+                if len(samples) == 30:
+                    avg = sum(samples) / len(samples)
+                    self._breath_baseline[did] = avg
+                continue
+
+            # Compare against baseline — 30% change = real breathing
+            baseline = self._breath_baseline.get(did, 20.0)
+            if abs(bpm - baseline) > baseline * 0.3:
+                nodes_with_real_breathing += 1
+
+        return max(camera, fused, nodes_with_real_breathing)
 
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
