@@ -41,10 +41,10 @@ DEFAULT_ZONE = {
     "lastActivity": None,
 }
 DEVICE_POSITIONS = [
-    (60, 330),    # Node 1 — 1001호 좌하
-    (60, 50),     # Node 2 — 좌상
-    (740, 50),    # Node 3 — 우상
-    (740, 330),   # Node 4 — 우하
+    (60, 330),    # Node 1 — A5 (1001호 좌하)
+    (60, 80),     # Node 2 — A2 (1001호 좌상)
+    (740, 30),    # Node 3 — H1 (1004호 우상)
+    (650, 250),   # Node 4 — G4 (1004호 중간)
 ]
 CSI_MAGIC = 0xC5110001
 VITALS_MAGIC = 0xC5110002
