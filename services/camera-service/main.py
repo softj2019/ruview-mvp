@@ -10,9 +10,12 @@ Endpoints:
   PUT  /cam/calibration    Update calibration points
   POST /cam/calibration/snapshot  Get snapshot for calibration UI
 """
+import os
+# Must be set before any OpenCV import
+os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
+
 import asyncio
 import json
-import os
 import threading
 import time
 
@@ -22,7 +25,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, Response
 
-from camera import CameraCapture, CameraConfig
+from camera import CameraCapture
 from detector import Detector
 from calibration import Calibrator
 
@@ -37,12 +40,7 @@ SIGNAL_ADAPTER_URL = os.getenv("SIGNAL_ADAPTER_URL", "http://localhost:8001")
 
 # ---- Globals ----
 
-camera = CameraCapture(CameraConfig(
-    device_index=CAMERA_INDEX,
-    width=CAMERA_WIDTH,
-    height=CAMERA_HEIGHT,
-    fps=CAMERA_FPS,
-))
+camera = CameraCapture(device_index=CAMERA_INDEX, fps=CAMERA_FPS)
 detector = Detector()
 calibrator = Calibrator()
 
@@ -139,11 +137,19 @@ async def lifespan(app: FastAPI):
     global _detect_running, _detect_thread, _loop
     _loop = asyncio.get_running_loop()
 
-    # Start camera
+    # Start camera and wait for first frame
     camera.start()
     print(f"[camera-service] Camera started (device={CAMERA_INDEX})")
+    for _ in range(50):  # wait up to 5 seconds
+        if camera.frame is not None:
+            break
+        await asyncio.sleep(0.1)
+    if camera.frame is not None:
+        print(f"[camera-service] First frame captured")
+    else:
+        print(f"[camera-service] WARNING: no frame after 5s")
 
-    # Load YOLO model
+    # Load YOLO model (after camera is stable)
     detector.load()
 
     # Start detection thread
