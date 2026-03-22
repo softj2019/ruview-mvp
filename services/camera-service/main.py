@@ -56,6 +56,8 @@ _ws_clients: list[WebSocket] = []
 def _detection_loop():
     """Background thread: periodically runs YOLO on latest frame."""
     global _detect_frame_count
+    _det_count = 0
+    _det_t0 = time.monotonic()
     while _detect_running:
         frame = camera.frame
         if frame is None:
@@ -68,6 +70,12 @@ def _detection_loop():
             continue
 
         dets = detector.detect(frame)
+        _det_count += 1
+        elapsed = time.monotonic() - _det_t0
+        if elapsed >= 1.0:
+            detector._fps = _det_count / elapsed
+            _det_count = 0
+            _det_t0 = time.monotonic()
 
         # Build detection payload with floor positions
         det_list = []

@@ -624,7 +624,7 @@ class Observatory {
       console.log(`[Observatory] Trying ${base}/health ...`);
       try {
         const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 3000);
+        const timer = setTimeout(() => controller.abort(), 10000);
         const r = await fetch(`${base}/health`, { signal: controller.signal });
         clearTimeout(timer);
         if (!r.ok) { tryNext(i + 1); return; }
