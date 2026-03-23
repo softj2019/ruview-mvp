@@ -1,5 +1,5 @@
-import { useState, useRef } from 'react';
-import { Camera, Maximize2, Minimize2, Settings } from 'lucide-react';
+import { useState, useRef, useCallback } from 'react';
+import { Camera, Maximize2, Minimize2, Settings, ZoomIn, ZoomOut } from 'lucide-react';
 import { Card, CardHeader } from '@/components/ui';
 import { useZoneStore } from '@/stores/zoneStore';
 
@@ -17,9 +17,28 @@ export default function CameraFeed() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showCalibration, setShowCalibration] = useState(false);
   const [connected, setConnected] = useState(true);
+  const [zoom, setZoom] = useState(1.0);
   const imgRef = useRef<HTMLImageElement>(null);
   const zones = useZoneStore((s) => s.zones);
   const cameraPersonCount = (zones[0] as Record<string, unknown>)?.camera_person_count as number | undefined;
+
+  const handleZoom = useCallback(async (delta: number) => {
+    const newZoom = Math.max(1.0, Math.min(5.0, zoom + delta));
+    setZoom(newZoom);
+    try {
+      await fetch(`${CAM_BASE}/cam/zoom`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ level: newZoom, center: [0.5, 0.5] }),
+      });
+      // Force stream reload
+      if (imgRef.current) {
+        const src = imgRef.current.src;
+        imgRef.current.src = '';
+        imgRef.current.src = src;
+      }
+    } catch {}
+  }, [zoom]);
 
   const streamUrl = `${CAM_BASE}/cam/stream`;
 
@@ -80,7 +99,24 @@ export default function CameraFeed() {
             )}
           </span>
         </CardHeader>
-        <div className="flex gap-1">
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => handleZoom(-0.5)}
+            className="rounded p-1 text-gray-500 transition-colors hover:text-cyan-400 disabled:opacity-30"
+            disabled={zoom <= 1.0}
+          >
+            <ZoomOut className="h-3.5 w-3.5" />
+          </button>
+          {zoom > 1.0 && (
+            <span className="text-[10px] text-cyan-400">{zoom.toFixed(1)}x</span>
+          )}
+          <button
+            onClick={() => handleZoom(0.5)}
+            className="rounded p-1 text-gray-500 transition-colors hover:text-cyan-400 disabled:opacity-30"
+            disabled={zoom >= 5.0}
+          >
+            <ZoomIn className="h-3.5 w-3.5" />
+          </button>
           <button
             onClick={() => setShowCalibration(!showCalibration)}
             className="rounded p-1 text-gray-500 transition-colors hover:text-cyan-400"

@@ -38,6 +38,10 @@ CAMERA_FPS = int(os.getenv("CAMERA_FPS", "15"))
 DETECT_SKIP = int(os.getenv("DETECT_SKIP", "2"))  # run detection every N frames
 SIGNAL_ADAPTER_URL = os.getenv("SIGNAL_ADAPTER_URL", "http://localhost:8001")
 
+# Digital zoom state
+_zoom_level = 1.0  # 1.0 = no zoom, 2.0 = 2x, etc.
+_zoom_center = [0.5, 0.5]  # normalized center (0-1)
+
 # ---- Globals ----
 
 camera = CameraCapture(device_index=CAMERA_INDEX, fps=CAMERA_FPS)
@@ -177,6 +181,23 @@ app.add_middleware(
 )
 
 
+def _apply_zoom(frame):
+    """Apply digital zoom by cropping and resizing."""
+    if _zoom_level <= 1.0:
+        return frame
+    h, w = frame.shape[:2]
+    crop_w = int(w / _zoom_level)
+    crop_h = int(h / _zoom_level)
+    cx = int(_zoom_center[0] * w)
+    cy = int(_zoom_center[1] * h)
+    x1 = max(0, cx - crop_w // 2)
+    y1 = max(0, cy - crop_h // 2)
+    x2 = min(w, x1 + crop_w)
+    y2 = min(h, y1 + crop_h)
+    cropped = frame[y1:y2, x1:x2]
+    return cv2.resize(cropped, (w, h), interpolation=cv2.INTER_LINEAR)
+
+
 # ---- Endpoints ----
 
 @app.get("/cam/health")
@@ -193,15 +214,18 @@ async def health():
 
 
 def _generate_mjpeg():
-    """Generator yielding MJPEG frames with detection overlay."""
+    """Generator yielding MJPEG frames with detection overlay + zoom."""
     while True:
         frame = camera.frame
         if frame is None:
             time.sleep(0.05)
             continue
 
+        # Apply digital zoom
+        zoomed = _apply_zoom(frame)
+
         # Draw overlay
-        overlay_frame = detector.draw_overlay(frame)
+        overlay_frame = detector.draw_overlay(zoomed)
 
         # Encode to JPEG
         _, jpeg = cv2.imencode(".jpg", overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -227,7 +251,8 @@ async def snapshot():
     frame = camera.frame
     if frame is None:
         return Response(status_code=503, content="Camera not ready")
-    overlay_frame = detector.draw_overlay(frame)
+    zoomed = _apply_zoom(frame)
+    overlay_frame = detector.draw_overlay(zoomed)
     _, jpeg = cv2.imencode(".jpg", overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
 
@@ -254,6 +279,24 @@ async def ws_detections(websocket: WebSocket):
     finally:
         if websocket in _ws_clients:
             _ws_clients.remove(websocket)
+
+
+# ---- Zoom Endpoints ----
+
+@app.get("/cam/zoom")
+async def get_zoom():
+    return {"level": _zoom_level, "center": _zoom_center}
+
+
+@app.put("/cam/zoom")
+async def set_zoom(body: dict):
+    """Set digital zoom. level: 1.0-5.0, center: [0-1, 0-1]"""
+    global _zoom_level, _zoom_center
+    level = body.get("level", _zoom_level)
+    center = body.get("center", _zoom_center)
+    _zoom_level = max(1.0, min(5.0, float(level)))
+    _zoom_center = [max(0, min(1, float(center[0]))), max(0, min(1, float(center[1])))]
+    return {"level": _zoom_level, "center": _zoom_center}
 
 
 # ---- Calibration Endpoints ----
