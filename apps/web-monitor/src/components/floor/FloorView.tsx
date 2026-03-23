@@ -149,22 +149,7 @@ export default function FloorView() {
     return cells;
   }, [devices]);
 
-  // Signal paths
-  const signalPaths = useMemo(() => {
-    const online = devices.filter((d) => d.status === 'online');
-    const paths: { x1: number; y1: number; x2: number; y2: number; motion: number }[] = [];
-    for (let i = 0; i < online.length; i++) {
-      for (let j = i + 1; j < online.length; j++) {
-        const avgMotion = ((online[i].motion_energy ?? 0) + (online[j].motion_energy ?? 0)) / 2;
-        paths.push({
-          x1: online[i].x, y1: online[i].y,
-          x2: online[j].x, y2: online[j].y,
-          motion: avgMotion,
-        });
-      }
-    }
-    return paths;
-  }, [devices]);
+  // (Signal paths removed — was misleading, nodes don't communicate directly)
 
   return (
     <Card variant="glow" className="h-[420px]">
@@ -271,18 +256,16 @@ export default function FloorView() {
           ))}
         </g>
 
-        {/* Signal paths */}
-        {signalPaths.map((path, i) => (
-          <line
-            key={i}
-            x1={path.x1} y1={path.y1}
-            x2={path.x2} y2={path.y2}
-            stroke={path.motion > 1 ? '#fbbf24' : '#22d3ee'}
-            strokeWidth={path.motion > 1 ? 1.5 : 0.8}
-            strokeOpacity={Math.min(0.15 + path.motion * 0.1, 0.5)}
-            strokeDasharray={path.motion > 1 ? 'none' : '4 4'}
-          />
-        ))}
+        {/* Heatmap legend */}
+        <g transform="translate(20,385)">
+          <text fill="#475569" fontSize="7">CSI 감지 분포</text>
+          <rect x="70" y="-6" width="10" height="8" fill="rgba(34,211,238,0.3)" />
+          <text x="82" fill="#475569" fontSize="6" dominantBaseline="middle">약</text>
+          <rect x="95" y="-6" width="10" height="8" fill="rgba(250,204,21,0.4)" />
+          <text x="107" fill="#475569" fontSize="6" dominantBaseline="middle">중</text>
+          <rect x="120" y="-6" width="10" height="8" fill="rgba(239,68,68,0.5)" />
+          <text x="132" fill="#475569" fontSize="6" dominantBaseline="middle">강</text>
+        </g>
 
         {/* Devices (draggable) */}
         {devices.map((device) => {
@@ -328,19 +311,31 @@ export default function FloorView() {
                 className={device.status === 'online' && !isDragging ? 'animate-pulse' : ''}
               />
 
-              {/* Label */}
-              <text y="-12" textAnchor="middle" fill="#94a3b8" fontSize="9" fontWeight="500">
+              {/* Node label */}
+              <text y="-14" textAnchor="middle" fill="#94a3b8" fontSize="9" fontWeight="600">
                 {device.name?.replace('ESP32 ', '')}
               </text>
 
-              {/* Status text */}
+              {/* Status info */}
               {device.status === 'online' && (
-                <text y="18" textAnchor="middle" fill="#64748b" fontSize="7.5">
-                  {isBreathing ? `${breathBpm?.toFixed(0)} BPM` : `${device.signalStrength}dBm`}
-                </text>
+                <>
+                  <text y="16" textAnchor="middle" fill="#64748b" fontSize="7">
+                    {device.signalStrength}dBm
+                  </text>
+                  {isBreathing && (
+                    <text y="25" textAnchor="middle" fill="#f43f5e" fontSize="7">
+                      {breathBpm?.toFixed(0)} BPM
+                    </text>
+                  )}
+                  {(device.csi_heart_rate ?? 0) > 0 && (
+                    <text y={isBreathing ? 34 : 25} textAnchor="middle" fill="#fb7185" fontSize="6.5">
+                      HR {device.csi_heart_rate?.toFixed(0)}
+                    </text>
+                  )}
+                </>
               )}
               {device.status === 'offline' && (
-                <text y="18" textAnchor="middle" fill="#ef4444" fontSize="7.5">
+                <text y="16" textAnchor="middle" fill="#ef4444" fontSize="7.5">
                   offline
                 </text>
               )}
