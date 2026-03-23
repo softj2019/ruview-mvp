@@ -3,6 +3,7 @@ import json
 import math
 import os
 import struct
+import time as _time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -185,63 +186,6 @@ class SignalAdapterRuntime:
         if nodes_with_presence >= 3 and total < sum(non_zero) // nodes_with_presence + 1:
             total = sum(non_zero) // nodes_with_presence + 1
         return total
-
-    def _estimate_presence_from_csi(self) -> int:
-        """Fallback person-count estimate when vitals counts are unavailable.
-
-        Uses an adaptive baseline: collects motion values for the first
-        60 seconds after startup, then estimates presence from the delta
-        above baseline.
-        """
-        online_nodes = [
-            d for d in self.devices.values()
-            if d.get("status") == "online"
-        ]
-        if not online_nodes:
-            return 0
-
-        motions = [d.get("motion_energy", 0) for d in online_nodes]
-
-        # Adaptive baseline calibration
-        if not hasattr(self, "_motion_baseline"):
-            self._motion_baseline = {}
-            self._motion_baseline_samples = {}
-            self._baseline_ready = False
-
-        for d in online_nodes:
-            did = d["id"]
-            m = d.get("motion_energy", 0)
-            if did not in self._motion_baseline_samples:
-                self._motion_baseline_samples[did] = []
-            samples = self._motion_baseline_samples[did]
-            if len(samples) < 60:  # ~60 samples for calibration
-                samples.append(m)
-                if len(samples) == 60:
-                    avg = sum(samples) / len(samples)
-                    std = (sum((x - avg) ** 2 for x in samples) / len(samples)) ** 0.5
-                    self._motion_baseline[did] = avg + 3 * std
-            # Check if all nodes calibrated
-            if all(len(self._motion_baseline_samples.get(d["id"], [])) >= 60 for d in online_nodes):
-                self._baseline_ready = True
-
-        if not self._baseline_ready:
-            return 0  # Still calibrating
-
-        # Count nodes with motion above their baseline
-        nodes_with_presence = 0
-        total_delta = 0.0
-        for d in online_nodes:
-            did = d["id"]
-            m = d.get("motion_energy", 0)
-            baseline = self._motion_baseline.get(did, 10.0)
-            if m > baseline:
-                nodes_with_presence += 1
-                total_delta += m - baseline
-
-        if nodes_with_presence == 0:
-            return 0
-
-        return max(1, round(math.log2(1 + total_delta) * nodes_with_presence / 2))
 
     def _recompute_presence_count(self) -> int:
         """Fuse vitals n_persons, Welford z-score presence, and camera.
@@ -429,7 +373,10 @@ class SignalAdapterRuntime:
 
         sb = get_supabase()
         if sb and events:
-            sb.table("events").insert([e.model_dump() for e in events]).execute()
+            try:
+                sb.table("events").insert([e.model_dump() for e in events]).execute()
+            except Exception:
+                pass  # Non-critical: Supabase may be unavailable
 
     async def handle_csi_frame(self, data: bytes, addr: tuple[str, int]) -> None:
         if len(data) < 20:
@@ -498,7 +445,6 @@ class SignalAdapterRuntime:
         self._recompute_presence_count()
 
         # Throttled broadcast: max once per 200ms to prevent event loop saturation
-        import time as _time
         now = _time.monotonic()
         if now - self._last_broadcast_time >= self._broadcast_interval:
             self._last_broadcast_time = now
@@ -757,7 +703,7 @@ async def websocket_events(websocket: WebSocket):
         )
         while True:
             await websocket.receive_text()
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, Exception):
         runtime.manager.disconnect(websocket)
 
 
