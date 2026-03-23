@@ -43,6 +43,8 @@ class ProcessedCSI:
     estimated_persons: int = 0
     per_person_breathing: list[float] | None = None
     doppler_velocity: float | None = None
+    csi_pose: str | None = None
+    csi_pose_confidence: float = 0.0
 
 
 class WelfordStats:
@@ -232,6 +234,11 @@ class CSIProcessor:
         # Multi-person separation via subcarrier correlation clustering
         estimated_persons, per_person_breathing = self._estimate_persons(device_id)
 
+        # --- Step 7: CSI-based pose classification ---
+        csi_pose, csi_pose_confidence = self._classify_pose_csi(
+            motion_index, breathing_rate, doppler_velocity
+        )
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -249,7 +256,49 @@ class CSIProcessor:
             estimated_persons=estimated_persons,
             per_person_breathing=per_person_breathing,
             doppler_velocity=doppler_velocity,
+            csi_pose=csi_pose,
+            csi_pose_confidence=csi_pose_confidence,
         )
+
+    # ------------------------------------------------------------------
+    # CSI-based pose classification
+    # ------------------------------------------------------------------
+
+    def _classify_pose_csi(
+        self,
+        motion_index: float,
+        breathing_rate: float | None,
+        doppler_velocity: float | None,
+    ) -> tuple[str | None, float]:
+        """Classify pose from CSI motion and Doppler features.
+
+        Returns (pose_string, confidence).
+        """
+        doppler = doppler_velocity if doppler_velocity is not None else 0.0
+
+        # Sudden motion spike -> possible fall
+        if motion_index > 8.0:
+            return ("fallen", 0.5)
+
+        # Walking: high motion or significant Doppler velocity
+        if motion_index > 3.0 or doppler > 0.3:
+            return ("walking", 0.7)
+
+        # Standing: moderate motion
+        if 0.5 <= motion_index <= 3.0:
+            return ("standing", 0.6)
+
+        # Sitting: low motion with normal breathing
+        if motion_index < 0.5:
+            breathing_normal = (
+                breathing_rate is not None and 8.0 <= breathing_rate <= 25.0
+            )
+            if breathing_normal:
+                return ("sitting", 0.8)
+            # Low motion but no breathing detected — might still be sitting/standing
+            return ("sitting", 0.5)
+
+        return (None, 0.0)
 
     # ------------------------------------------------------------------
     # SOTA algorithms ported from ruvnet/RuView Rust crates

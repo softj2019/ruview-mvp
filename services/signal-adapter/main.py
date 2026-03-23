@@ -430,6 +430,11 @@ class SignalAdapterRuntime:
             device["csi_estimated_persons"] = processed.estimated_persons
             device["csi_per_person_breathing"] = processed.per_person_breathing
 
+        # CSI pose classification
+        if processed.csi_pose is not None:
+            device["csi_pose"] = processed.csi_pose
+            device["csi_pose_confidence"] = processed.csi_pose_confidence
+
         # Server-side vitals extraction (supplement firmware vitals)
         if processed.breathing_rate is not None:
             device["csi_breathing_bpm"] = processed.breathing_rate
@@ -622,6 +627,29 @@ async def update_device_position(device_id: str, body: dict):
     return {"status": "ok", "x": int(x), "y": int(y)}
 
 
+def _fuse_poses(camera_pose: str | None, camera_conf: float,
+                 csi_pose: str | None, csi_conf: float) -> tuple[str, float]:
+    """Fuse camera and CSI pose estimates.
+
+    Camera weight = 0.8, CSI weight = 0.2.
+    If both agree, confidence is boosted to 0.9+.
+    """
+    if camera_pose and csi_pose:
+        if camera_pose == csi_pose:
+            # Agreement — high confidence
+            fused_conf = min(0.9 + 0.1 * min(camera_conf, csi_conf), 1.0)
+            return (camera_pose, round(fused_conf, 3))
+        else:
+            # Disagreement — weighted blend, camera wins
+            fused_conf = camera_conf * 0.8 + csi_conf * 0.2
+            return (camera_pose, round(fused_conf, 3))
+    elif camera_pose:
+        return (camera_pose, round(camera_conf, 3))
+    elif csi_pose:
+        return (csi_pose, round(csi_conf, 3))
+    return ("unknown", 0.0)
+
+
 @app.post("/api/camera/detections")
 async def camera_detections(body: dict):
     """Receive detection results from camera-service for CSI+camera fusion."""
@@ -631,6 +659,53 @@ async def camera_detections(body: dict):
     # Store camera data for fusion
     runtime.zones[0]["camera_person_count"] = person_count
     runtime.zones[0]["camera_detections"] = detections
+
+    # --- Pose fusion: camera + CSI ---
+    pose_updates = []
+    for det in detections:
+        cam_pose = det.get("pose")
+        cam_pose_conf = det.get("pose_confidence", 0.0)
+        cam_keypoints = det.get("keypoints")
+
+        # Find the closest device for CSI pose lookup
+        # Use bbox center to match against device positions
+        bbox = det.get("bbox", [0, 0, 0, 0])
+        det_cx = (bbox[0] + bbox[2]) / 2 if len(bbox) == 4 else 0
+        det_cy = (bbox[1] + bbox[3]) / 2 if len(bbox) == 4 else 0
+
+        # Try to fuse with any device that has a CSI pose
+        best_device = None
+        best_dist = float("inf")
+        for dev in runtime.devices.values():
+            if dev.get("status") != "online":
+                continue
+            if dev.get("csi_pose") is None:
+                continue
+            dx = dev.get("x", 0) - det_cx
+            dy = dev.get("y", 0) - det_cy
+            dist = dx * dx + dy * dy
+            if dist < best_dist:
+                best_dist = dist
+                best_device = dev
+
+        csi_pose = best_device.get("csi_pose") if best_device else None
+        csi_pose_conf = best_device.get("csi_pose_confidence", 0.0) if best_device else 0.0
+
+        fused_pose, fused_conf = _fuse_poses(cam_pose, cam_pose_conf, csi_pose, csi_pose_conf)
+
+        # Store fused pose on the matched device
+        if best_device is not None:
+            best_device["pose"] = fused_pose
+            best_device["pose_confidence"] = fused_conf
+
+        pose_updates.append({
+            "pose": fused_pose,
+            "pose_confidence": fused_conf,
+            "device_id": best_device["id"] if best_device else None,
+            "camera_pose": cam_pose,
+            "csi_pose": csi_pose,
+            "keypoints": cam_keypoints,
+        })
 
     # Cross-validate: camera provides more accurate person count
     if not runtime.zones[0].get("_manual_override") and person_count > 0:
@@ -644,6 +719,11 @@ async def camera_detections(body: dict):
         "detections": detections,
         "person_count": person_count,
     })
+
+    # Broadcast pose updates
+    if pose_updates:
+        await runtime.broadcast("pose_update", {"poses": pose_updates})
+
     await runtime.broadcast_zones()
 
     return {"status": "ok", "fused_count": runtime.zones[0]["presenceCount"]}
