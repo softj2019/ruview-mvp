@@ -1032,6 +1032,301 @@ class Observatory {
   }
 
   // ========================================
+  // PHASE PLOT PANEL
+  // ========================================
+
+  _buildPhasePlotPanel() {
+    // Floating panel showing phase across subcarriers as a line graph
+    // Positioned next to the CSI heatmap, slightly lower
+    this._phaseGroup = new THREE.Group();
+    this._phaseGroup.name = 'phase-plot-panel';
+    this._phaseGroup.position.set(-5.2 + 2.7, 3.0, -3.5);
+    this._phaseGroup.rotation.y = 0.3;
+    this._phaseGroup.rotation.x = -0.05;
+
+    const panelW = 2.0;
+    const panelH = 1.0;
+
+    // Canvas for phase plot texture (256x128)
+    this._phaseCanvas = document.createElement('canvas');
+    this._phaseCanvas.width = 256;
+    this._phaseCanvas.height = 128;
+    this._phaseCtx = this._phaseCanvas.getContext('2d');
+    this._phaseCtx.fillStyle = '#000011';
+    this._phaseCtx.fillRect(0, 0, 256, 128);
+
+    this._phaseTexture = new THREE.CanvasTexture(this._phaseCanvas);
+    this._phaseTexture.minFilter = THREE.LinearFilter;
+    this._phaseTexture.magFilter = THREE.LinearFilter;
+
+    // Phase plot plane
+    const planeGeo = new THREE.PlaneGeometry(panelW, panelH);
+    const planeMat = new THREE.MeshBasicMaterial({
+      map: this._phaseTexture,
+      transparent: true,
+      opacity: 0.88,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this._phaseGroup.add(new THREE.Mesh(planeGeo, planeMat));
+
+    // Border frame
+    const frameGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(panelW + 0.06, panelH + 0.06));
+    const frameMat = new THREE.LineBasicMaterial({ color: 0x2090ff, opacity: 0.5, transparent: true });
+    const frame = new THREE.LineSegments(frameGeo, frameMat);
+    frame.position.z = 0.001;
+    this._phaseGroup.add(frame);
+
+    // Title label
+    const titleSprite = this._createHoloLabel('PHASE PLOT', 0x5588cc);
+    titleSprite.position.set(0, panelH / 2 + 0.12, 0);
+    titleSprite.scale.set(1.0, 0.18, 1);
+    this._phaseGroup.add(titleSprite);
+
+    // Axis labels
+    const xLabel = this._createHoloLabel('SUBCARRIER (0-30)', 0x446688);
+    xLabel.position.set(0, -panelH / 2 - 0.1, 0);
+    xLabel.scale.set(0.9, 0.13, 1);
+    this._phaseGroup.add(xLabel);
+
+    const yLabel = this._createHoloLabel('PHASE', 0x446688);
+    yLabel.position.set(-panelW / 2 - 0.18, 0, 0);
+    yLabel.scale.set(0.4, 0.13, 1);
+    this._phaseGroup.add(yLabel);
+
+    this._scene.add(this._phaseGroup);
+  }
+
+  _updatePhasePlotPanel(data, elapsed) {
+    if (!this._phaseGroup) return;
+
+    const ctx = this._phaseCtx;
+    const W = 256;
+    const H = 128;
+
+    // Clear with dark background
+    ctx.fillStyle = 'rgba(0, 0, 17, 1)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Draw grid lines (subtle)
+    ctx.strokeStyle = 'rgba(32, 64, 96, 0.3)';
+    ctx.lineWidth = 0.5;
+    // Horizontal: -pi, 0, pi
+    for (let i = 0; i <= 4; i++) {
+      const y = (i / 4) * H;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+    // Vertical: every 5 subcarriers
+    for (let s = 0; s <= 30; s += 5) {
+      const x = (s / 30) * W;
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, H);
+      ctx.stroke();
+    }
+
+    // Generate or extract phase data for 30 subcarriers
+    const nSc = 30;
+    const phases = new Float32Array(nSc);
+    const feat = data?.features || {};
+    const variance = feat.variance || 0;
+
+    for (let s = 0; s < nSc; s++) {
+      // Synthesize phase pattern: combine slow drift + body-induced modulation
+      const basePhase = Math.sin(elapsed * 0.5 + s * 0.2) * 1.5;
+      const bodyMod = Math.sin(elapsed * 1.8 + s * 0.35) * variance * 2.0;
+      const noise = (Math.random() - 0.5) * 0.15;
+      phases[s] = Math.max(-Math.PI, Math.min(Math.PI, basePhase + bodyMod + noise));
+    }
+
+    // Draw phase line plot
+    // Y-axis: -pi at bottom, +pi at top
+    ctx.beginPath();
+    ctx.strokeStyle = '#20d0ff';
+    ctx.lineWidth = 2;
+    ctx.shadowColor = '#20d0ff';
+    ctx.shadowBlur = 4;
+
+    for (let s = 0; s < nSc; s++) {
+      const x = (s / (nSc - 1)) * (W - 8) + 4;
+      // Map phase [-pi, pi] to canvas Y [H-4, 4] (inverted: pi at top)
+      const normalizedY = (phases[s] + Math.PI) / (2 * Math.PI);
+      const y = H - 4 - normalizedY * (H - 8);
+
+      if (s === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Draw data points
+    ctx.fillStyle = '#60e0ff';
+    for (let s = 0; s < nSc; s++) {
+      const x = (s / (nSc - 1)) * (W - 8) + 4;
+      const normalizedY = (phases[s] + Math.PI) / (2 * Math.PI);
+      const y = H - 4 - normalizedY * (H - 8);
+      ctx.beginPath();
+      ctx.arc(x, y, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    this._phaseTexture.needsUpdate = true;
+
+    // Subtle float animation
+    this._phaseGroup.position.y = 3.0 + Math.sin(elapsed * 0.7 + 1.0) * 0.04;
+  }
+
+  // ========================================
+  // DOPPLER SPECTRUM PANEL
+  // ========================================
+
+  _buildDopplerSpectrumPanel() {
+    // Floating panel showing 16-bar Doppler frequency distribution
+    // Positioned below the CSI heatmap
+    this._dopplerGroup = new THREE.Group();
+    this._dopplerGroup.name = 'doppler-spectrum-panel';
+    this._dopplerGroup.position.set(-5.2, 1.4, -3.5);
+    this._dopplerGroup.rotation.y = 0.3;
+    this._dopplerGroup.rotation.x = -0.05;
+
+    const panelW = 2.0;
+    const panelH = 1.0;
+
+    // Canvas for Doppler spectrum texture (256x128)
+    this._dopplerCanvas = document.createElement('canvas');
+    this._dopplerCanvas.width = 256;
+    this._dopplerCanvas.height = 128;
+    this._dopplerCtx = this._dopplerCanvas.getContext('2d');
+    this._dopplerCtx.fillStyle = '#000011';
+    this._dopplerCtx.fillRect(0, 0, 256, 128);
+
+    this._dopplerTexture = new THREE.CanvasTexture(this._dopplerCanvas);
+    this._dopplerTexture.minFilter = THREE.LinearFilter;
+    this._dopplerTexture.magFilter = THREE.LinearFilter;
+
+    // Doppler spectrum plane
+    const planeGeo = new THREE.PlaneGeometry(panelW, panelH);
+    const planeMat = new THREE.MeshBasicMaterial({
+      map: this._dopplerTexture,
+      transparent: true,
+      opacity: 0.88,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this._dopplerGroup.add(new THREE.Mesh(planeGeo, planeMat));
+
+    // Border frame
+    const frameGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(panelW + 0.06, panelH + 0.06));
+    const frameMat = new THREE.LineBasicMaterial({ color: 0x2090ff, opacity: 0.5, transparent: true });
+    const frame = new THREE.LineSegments(frameGeo, frameMat);
+    frame.position.z = 0.001;
+    this._dopplerGroup.add(frame);
+
+    // Title label
+    const titleSprite = this._createHoloLabel('DOPPLER SPECTRUM', 0x5588cc);
+    titleSprite.position.set(0, panelH / 2 + 0.12, 0);
+    titleSprite.scale.set(1.1, 0.18, 1);
+    this._dopplerGroup.add(titleSprite);
+
+    // Axis labels
+    const xLabel = this._createHoloLabel('FREQUENCY BIN', 0x446688);
+    xLabel.position.set(0, -panelH / 2 - 0.1, 0);
+    xLabel.scale.set(0.9, 0.13, 1);
+    this._dopplerGroup.add(xLabel);
+
+    const yLabel = this._createHoloLabel('MAG', 0x446688);
+    yLabel.position.set(-panelW / 2 - 0.15, 0, 0);
+    yLabel.scale.set(0.35, 0.13, 1);
+    this._dopplerGroup.add(yLabel);
+
+    this._scene.add(this._dopplerGroup);
+
+    // Smoothed bin values for animation
+    this._dopplerBins = new Float32Array(16);
+  }
+
+  _updateDopplerSpectrumPanel(data, elapsed) {
+    if (!this._dopplerGroup) return;
+
+    const ctx = this._dopplerCtx;
+    const W = 256;
+    const H = 128;
+    const N_BINS = 16;
+
+    // Clear
+    ctx.fillStyle = 'rgba(0, 0, 17, 1)';
+    ctx.fillRect(0, 0, W, H);
+
+    // Generate Doppler spectrum from scene data
+    const feat = data?.features || {};
+    const motionPower = feat.motion_band_power || 0;
+    const dominantFreq = feat.dominant_freq_hz || 0;
+    const spectralPower = feat.spectral_power || 0;
+
+    // Synthesize 16 frequency bins spanning 0-10 Hz (Nyquist for 20 Hz sample rate)
+    const targetBins = new Float32Array(N_BINS);
+    for (let b = 0; b < N_BINS; b++) {
+      const binFreq = (b + 0.5) * (10.0 / N_BINS); // center frequency of bin
+      // Create spectral shape: peaked around dominant frequency + noise floor
+      const distFromPeak = Math.abs(binFreq - dominantFreq * 10);
+      const peakContrib = Math.exp(-distFromPeak * distFromPeak * 0.15) * motionPower;
+      const noise = Math.random() * 0.04;
+      const breathingBump = binFreq < 1.0 ? (feat.breathing_band_power || 0) * 0.5 : 0;
+      targetBins[b] = Math.min(1.0, peakContrib + breathingBump + spectralPower * 0.08 + noise);
+    }
+
+    // Smooth transition (exponential moving average)
+    for (let b = 0; b < N_BINS; b++) {
+      this._dopplerBins[b] += (targetBins[b] - this._dopplerBins[b]) * 0.15;
+    }
+
+    // Draw bars with blue-to-red gradient
+    const barW = (W - 16) / N_BINS; // leave margin
+    const margin = 8;
+
+    for (let b = 0; b < N_BINS; b++) {
+      const val = this._dopplerBins[b];
+      const barH = Math.max(2, val * (H - 16));
+      const x = margin + b * barW;
+      const y = H - 4 - barH;
+
+      // Color: blue(low freq) -> cyan -> green -> yellow -> red(high freq/magnitude)
+      // Blend by both bin position and magnitude
+      const t = val; // magnitude-based color
+      const hue = 0.6 - t * 0.6; // 0.6=blue -> 0=red
+      const sat = 0.85 + val * 0.15;
+      const light = 0.12 + val * 0.48;
+
+      // Bar fill
+      ctx.fillStyle = `hsl(${Math.round(hue * 360)}, ${Math.round(sat * 100)}%, ${Math.round(light * 100)}%)`;
+      ctx.fillRect(x + 1, y, barW - 2, barH);
+
+      // Glow effect at top of bar
+      const glowAlpha = Math.min(0.6, val * 0.8);
+      ctx.fillStyle = `hsla(${Math.round(hue * 360)}, 100%, 70%, ${glowAlpha})`;
+      ctx.fillRect(x + 1, y, barW - 2, Math.min(4, barH));
+    }
+
+    // Draw baseline
+    ctx.strokeStyle = 'rgba(32, 144, 255, 0.3)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(margin, H - 4);
+    ctx.lineTo(W - margin, H - 4);
+    ctx.stroke();
+
+    this._dopplerTexture.needsUpdate = true;
+
+    // Subtle float animation
+    this._dopplerGroup.position.y = 1.4 + Math.sin(elapsed * 0.7 + 2.0) * 0.04;
+  }
+
+  // ========================================
   // SIGNAL FIELD FLOOR (Gaussian Splat-like)
   // ========================================
 
