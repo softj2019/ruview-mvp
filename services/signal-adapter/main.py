@@ -382,6 +382,11 @@ class SignalAdapterRuntime:
             if dev["status"] != new_status:
                 dev["status"] = new_status
                 changed = True
+                if new_status == "offline":
+                    for key in ("breathing_bpm", "heart_rate", "csi_breathing_bpm",
+                                "csi_heart_rate", "motion_energy", "presence_score",
+                                "n_persons", "csi_estimated_persons"):
+                        dev[key] = 0
         if changed:
             await self.broadcast_devices()
             self._recompute_presence_count()
