@@ -114,6 +114,9 @@ class Observatory {
     this._buildPhasePlotPanel();
     this._buildDopplerSpectrumPanel();
     this._buildSignalFieldFloor();
+    this._buildVitalsOracle();
+    this._buildPhaseConstellation();
+    this._enhanceSignalFieldFloorZones();
 
     // Post-processing
     this._postProcessing = new PostProcessing(this._renderer, this._scene, this._camera);
@@ -737,6 +740,8 @@ class Observatory {
     this._updatePhasePlotPanel(data, elapsed);
     this._updateDopplerSpectrumPanel(data, elapsed);
     this._updateSignalFieldFloor(data, elapsed);
+    this._updateVitalsOracle(data, elapsed);
+    this._updatePhaseConstellation(data, elapsed);
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);
 
@@ -1400,19 +1405,67 @@ class Observatory {
     const colors = this._floorInstancedMesh.instanceColor.array;
     const dummy = this._floorDummy;
     const basePos = this._floorBasePositions;
+    const gridSize = 20;
+
+    // Build per-zone presence counts for coloring
+    // Zones map to grid quadrants: 1001=NW, 1002=NE, 1003=SW, 1004=SE
+    const zones = this._liveState?.zones || [];
+    const zonePresence = [0, 0, 0, 0]; // indices 0-3 for rooms 1001-1004
+    if (zones.length > 0) {
+      // Use live zone data if available
+      for (let z = 0; z < Math.min(zones.length, 4); z++) {
+        zonePresence[z] = zones[z]?.presenceCount || 0;
+      }
+    } else {
+      // Distribute estimated_persons across zones for demo mode
+      const totalPersons = data?.estimated_persons || 0;
+      if (totalPersons > 0) zonePresence[0] = Math.min(totalPersons, 2);
+      if (totalPersons > 2) zonePresence[1] = totalPersons - 2;
+    }
 
     for (let i = 0; i < count; i++) {
+      const ix = i % gridSize;
+      const iz = Math.floor(i / gridSize);
+
+      // Determine which zone this grid cell belongs to
+      // ix < 10 = west, ix >= 10 = east; iz < 10 = north, iz >= 10 = south
+      const zoneIdx = (ix < 10 ? 0 : 1) + (iz < 10 ? 0 : 2);
+      const presence = zonePresence[zoneIdx];
+
       // Use signal field data if available, otherwise generate from features
       const v = field ? (field[i] || 0) : 0.05;
 
-      // Color: blue(quiet) -> cyan -> green -> yellow -> red(active)
+      // Color: modulate by zone presence count
+      // Base: blue(quiet) -> cyan -> green -> yellow -> red(active)
+      // Presence adds warmth: 0=blue tint, 1+=cyan/green, 2+=amber
       let r, g, b;
-      if (v < 0.5) {
-        const t = v * 2;
-        r = 0; g = t; b = 1 - t;
+      if (presence === 0) {
+        // No presence: cool blue tones
+        if (v < 0.5) {
+          const t = v * 2;
+          r = 0; g = t * 0.3; b = 0.3 + t * 0.5;
+        } else {
+          const t = (v - 0.5) * 2;
+          r = 0; g = 0.3 + t * 0.3; b = 0.8 - t * 0.3;
+        }
+      } else if (presence === 1) {
+        // Single presence: cyan/green
+        if (v < 0.5) {
+          const t = v * 2;
+          r = 0; g = t; b = 1 - t * 0.5;
+        } else {
+          const t = (v - 0.5) * 2;
+          r = t * 0.3; g = 1 - t * 0.3; b = 0.5 - t * 0.3;
+        }
       } else {
-        const t = (v - 0.5) * 2;
-        r = t; g = 1 - t; b = 0;
+        // Multiple presence: warm amber/green
+        if (v < 0.5) {
+          const t = v * 2;
+          r = t * 0.6; g = t * 0.8; b = 0.1;
+        } else {
+          const t = (v - 0.5) * 2;
+          r = 0.6 + t * 0.4; g = 0.8 - t * 0.3; b = 0.1;
+        }
       }
       colors[i * 3] = r;
       colors[i * 3 + 1] = g;
@@ -1437,6 +1490,286 @@ class Observatory {
     this._floorInstancedMesh.instanceColor.needsUpdate = true;
     // Adjust shared material opacity based on average signal level
     this._floorMaterial.opacity = 0.35;
+  }
+
+  // ========================================
+  // VITALS ORACLE
+  // ========================================
+
+  _buildVitalsOracle() {
+    this._vitalsOracleGroup = new THREE.Group();
+    this._vitalsOracleGroup.name = 'vitals-oracle';
+    this._vitalsOracleGroup.position.set(4.5, 2.5, -2);
+
+    // Breathing ring — violet torus
+    const breathGeo = new THREE.TorusGeometry(0.5, 0.03, 16, 64);
+    this._voBreathMat = new THREE.MeshBasicMaterial({
+      color: 0x8844ff,
+      transparent: true,
+      opacity: 0.7,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this._voBreathRing = new THREE.Mesh(breathGeo, this._voBreathMat);
+    this._voBreathRing.rotation.x = Math.PI * 0.4;
+    this._vitalsOracleGroup.add(this._voBreathRing);
+
+    // Heart rate ring — crimson torus, rotated 90 degrees
+    const hrGeo = new THREE.TorusGeometry(0.35, 0.025, 16, 64);
+    this._voHrMat = new THREE.MeshBasicMaterial({
+      color: 0xff2244,
+      transparent: true,
+      opacity: 0.6,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this._voHrRing = new THREE.Mesh(hrGeo, this._voHrMat);
+    this._voHrRing.rotation.x = Math.PI * 0.5;
+    this._voHrRing.rotation.z = Math.PI * 0.15;
+    this._vitalsOracleGroup.add(this._voHrRing);
+
+    // Center orb with emissive glow
+    const orbGeo = new THREE.SphereGeometry(0.12, 24, 24);
+    this._voOrbMat = new THREE.MeshBasicMaterial({
+      color: 0x00d4ff,
+      transparent: true,
+      opacity: 0.5,
+      blending: THREE.AdditiveBlending,
+    });
+    this._voOrb = new THREE.Mesh(orbGeo, this._voOrbMat);
+    this._vitalsOracleGroup.add(this._voOrb);
+
+    // Point light for bloom effect
+    this._voLight = new THREE.PointLight(0x00d4ff, 1.5, 6);
+    this._vitalsOracleGroup.add(this._voLight);
+
+    // Title label
+    const titleSprite = this._createHoloLabel('VITAL SIGNS', 0x8866cc);
+    titleSprite.position.set(0, 0.8, 0);
+    titleSprite.scale.set(1.0, 0.18, 1);
+    this._vitalsOracleGroup.add(titleSprite);
+
+    this._scene.add(this._vitalsOracleGroup);
+  }
+
+  _updateVitalsOracle(data, elapsed) {
+    if (!this._vitalsOracleGroup) return;
+
+    const vs = data?.vital_signs || {};
+    const breathBpm = vs.breathing_rate_bpm || 0;
+    const hrBpm = vs.heart_rate_bpm || 0;
+    const breathConf = vs.breathing_confidence || 0;
+    const hrConf = vs.heart_rate_confidence || 0;
+
+    // Breathing ring pulsation at breathing_rate_bpm frequency
+    const breathFreq = breathBpm / 60;
+    const breathPulse = breathFreq > 0 ? Math.sin(elapsed * Math.PI * 2 * breathFreq) : 0;
+    const breathScale = 1.0 + breathPulse * 0.08 * breathConf;
+    this._voBreathRing.scale.set(breathScale, breathScale, 1);
+    this._voBreathMat.opacity = 0.3 + breathConf * 0.5;
+
+    // Heart ring pulsation — double-peak lub-dub pattern
+    const hrFreq = hrBpm / 60;
+    let hrPulse = 0;
+    if (hrFreq > 0) {
+      const phase = (elapsed * hrFreq) % 1.0;
+      // Lub-dub: two peaks per beat cycle at phase 0.0 and 0.15
+      const lub = Math.exp(-Math.pow((phase - 0.0) * 8, 2));
+      const dub = Math.exp(-Math.pow((phase - 0.15) * 10, 2)) * 0.7;
+      hrPulse = lub + dub;
+    }
+    const hrScale = 1.0 + hrPulse * 0.1 * hrConf;
+    this._voHrRing.scale.set(hrScale, hrScale, 1);
+    this._voHrMat.opacity = 0.2 + hrConf * 0.5;
+
+    // Slow rotation for both rings
+    this._voBreathRing.rotation.z = elapsed * 0.1;
+    this._voHrRing.rotation.z = -elapsed * 0.15;
+
+    // Center orb color shift based on confidence (blue -> green -> white)
+    const avgConf = (breathConf + hrConf) * 0.5;
+    const orbColor = new THREE.Color();
+    if (avgConf < 0.5) {
+      // Blue to green
+      orbColor.setRGB(0, avgConf * 2, 1.0 - avgConf);
+    } else {
+      // Green to white
+      const t = (avgConf - 0.5) * 2;
+      orbColor.setRGB(t, 1.0, t);
+    }
+    this._voOrbMat.color.copy(orbColor);
+    this._voLight.color.copy(orbColor);
+
+    // Orb scale pulsates with breathing
+    const orbPulse = 1.0 + breathPulse * 0.1;
+    this._voOrb.scale.set(orbPulse, orbPulse, orbPulse);
+    this._voLight.intensity = 0.8 + Math.abs(breathPulse) * 1.0;
+
+    // Subtle float animation
+    this._vitalsOracleGroup.position.y = 2.5 + Math.sin(elapsed * 0.5) * 0.05;
+  }
+
+  // ========================================
+  // PHASE CONSTELLATION
+  // ========================================
+
+  _buildPhaseConstellation() {
+    const NUM_POINTS = 30;
+    this._pcNumPoints = NUM_POINTS;
+
+    this._pcGroup = new THREE.Group();
+    this._pcGroup.name = 'phase-constellation';
+    this._pcGroup.position.set(4.5, 1.0, -2);
+
+    // Background reference circle ring
+    const ringGeo = new THREE.TorusGeometry(0.6, 0.005, 8, 64);
+    const ringMat = new THREE.MeshBasicMaterial({
+      color: 0x00d4ff,
+      transparent: true,
+      opacity: 0.15,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const ring = new THREE.Mesh(ringGeo, ringMat);
+    this._pcGroup.add(ring);
+
+    // Constellation star points
+    const starGeo = new THREE.BufferGeometry();
+    this._pcPositions = new Float32Array(NUM_POINTS * 3);
+    this._pcColors = new Float32Array(NUM_POINTS * 3);
+    this._pcSizes = new Float32Array(NUM_POINTS);
+
+    // Initialize points in a circle
+    for (let i = 0; i < NUM_POINTS; i++) {
+      const angle = (i / NUM_POINTS) * Math.PI * 2;
+      this._pcPositions[i * 3] = Math.cos(angle) * 0.5;
+      this._pcPositions[i * 3 + 1] = Math.sin(angle) * 0.5;
+      this._pcPositions[i * 3 + 2] = 0;
+      this._pcColors[i * 3] = 0;
+      this._pcColors[i * 3 + 1] = 0.5;
+      this._pcColors[i * 3 + 2] = 1.0;
+      this._pcSizes[i] = 0.06;
+    }
+
+    starGeo.setAttribute('position', new THREE.BufferAttribute(this._pcPositions, 3));
+    starGeo.setAttribute('color', new THREE.BufferAttribute(this._pcColors, 3));
+    starGeo.setAttribute('size', new THREE.BufferAttribute(this._pcSizes, 1));
+
+    const starMat = new THREE.PointsMaterial({
+      size: 0.08,
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.9,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+    this._pcStars = new THREE.Points(starGeo, starMat);
+    this._pcGroup.add(this._pcStars);
+
+    // Title label
+    const titleSprite = this._createHoloLabel('PHASE CONSTELLATION', 0x5588cc);
+    titleSprite.position.set(0, 0.9, 0);
+    titleSprite.scale.set(1.2, 0.18, 1);
+    this._pcGroup.add(titleSprite);
+
+    this._scene.add(this._pcGroup);
+  }
+
+  _updatePhaseConstellation(data, elapsed) {
+    if (!this._pcGroup) return;
+
+    const NUM_POINTS = this._pcNumPoints;
+    const feat = data?.features || {};
+    const variance = feat.variance || 0;
+    const motionPower = feat.motion_band_power || 0;
+
+    // Slow Y rotation for temporal evolution
+    this._pcGroup.rotation.y = elapsed * 0.05;
+
+    for (let i = 0; i < NUM_POINTS; i++) {
+      // Each point represents a subcarrier's phase angle on the constellation
+      const baseAngle = (i / NUM_POINTS) * Math.PI * 2;
+      const phaseShift = Math.sin(elapsed * 0.8 + i * 0.35) * variance * 1.5;
+      const angle = baseAngle + phaseShift;
+
+      // Amplitude determines radius (dim = close to center, bright = outer)
+      const amp = 0.3 + Math.sin(elapsed * 1.2 + i * 0.5) * 0.15 + motionPower * 0.2;
+      const radius = 0.2 + amp * 0.5;
+
+      this._pcPositions[i * 3] = Math.cos(angle) * radius;
+      this._pcPositions[i * 3 + 1] = Math.sin(angle) * radius;
+      this._pcPositions[i * 3 + 2] = 0;
+
+      // Color based on amplitude (dim blue -> bright cyan/white)
+      const brightness = Math.min(1.0, amp * 1.5);
+      this._pcColors[i * 3] = brightness * 0.4;
+      this._pcColors[i * 3 + 1] = 0.3 + brightness * 0.7;
+      this._pcColors[i * 3 + 2] = 0.6 + brightness * 0.4;
+
+      // Size based on variance (stable = small, active = large)
+      const varFactor = Math.abs(Math.sin(elapsed * 1.5 + i * 0.7)) * variance;
+      this._pcSizes[i] = 0.04 + varFactor * 0.12;
+    }
+
+    this._pcStars.geometry.attributes.position.needsUpdate = true;
+    this._pcStars.geometry.attributes.color.needsUpdate = true;
+    this._pcStars.geometry.attributes.size.needsUpdate = true;
+
+    // Subtle float animation
+    this._pcGroup.position.y = 1.0 + Math.sin(elapsed * 0.6 + 1.5) * 0.04;
+  }
+
+  // ========================================
+  // PRESENCE CARTOGRAPHY — Zone Enhancements
+  // ========================================
+
+  _enhanceSignalFieldFloorZones() {
+    // Zone boundary outlines and labels for rooms 1001-1004
+    // The floor grid is 20x20 spanning roughly -6..+6 (X) x -5..+5 (Z)
+    // Divide into 4 quadrants for 4 rooms
+    this._zoneGroup = new THREE.Group();
+    this._zoneGroup.name = 'presence-zones';
+
+    const zones = [
+      { id: '1001', cx: -3, cz: -2.5, w: 5.5, d: 4.5 },
+      { id: '1002', cx: 3,  cz: -2.5, w: 5.5, d: 4.5 },
+      { id: '1003', cx: -3, cz: 2.5,  w: 5.5, d: 4.5 },
+      { id: '1004', cx: 3,  cz: 2.5,  w: 5.5, d: 4.5 },
+    ];
+    this._zoneDefinitions = zones;
+
+    const lineMat = new THREE.LineBasicMaterial({
+      color: 0x00d4ff,
+      transparent: true,
+      opacity: 0.25,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+
+    for (const zone of zones) {
+      // Zone boundary outline (rectangle on the floor)
+      const hw = zone.w / 2;
+      const hd = zone.d / 2;
+      const points = [
+        new THREE.Vector3(zone.cx - hw, 0.06, zone.cz - hd),
+        new THREE.Vector3(zone.cx + hw, 0.06, zone.cz - hd),
+        new THREE.Vector3(zone.cx + hw, 0.06, zone.cz + hd),
+        new THREE.Vector3(zone.cx - hw, 0.06, zone.cz + hd),
+        new THREE.Vector3(zone.cx - hw, 0.06, zone.cz - hd),
+      ];
+      const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
+      const outline = new THREE.Line(lineGeo, lineMat);
+      this._zoneGroup.add(outline);
+
+      // Floating text label above each zone
+      const label = this._createHoloLabel(zone.id, 0x00d4ff);
+      label.position.set(zone.cx, 0.35, zone.cz);
+      label.scale.set(0.8, 0.16, 1);
+      this._zoneGroup.add(label);
+    }
+
+    this._scene.add(this._zoneGroup);
   }
 
   // ---- FPS ----
