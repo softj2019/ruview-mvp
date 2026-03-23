@@ -496,6 +496,129 @@ export class FigurePool {
     };
   }
 
+  // ---- Confidence-based coloring (from body-model.js approach) ----
+
+  /**
+   * Apply confidence-driven color temperature to joints and bones.
+   * Low confidence = cool blue, high confidence = warm cyan/green.
+   * Hue formula: hue = 0.55 - conf * 0.25 (from RuView body-model.js)
+   * Opacity formula: 0.5 + conf * 0.5
+   */
+  _applyConfidenceColoring(fig, confidence) {
+    const conf = Math.max(0, Math.min(1, confidence));
+    const hue = 0.55 - conf * 0.25;         // blue(0.55) -> green(0.3)
+    const saturation = 0.8;
+    const lightness = 0.35 + conf * 0.2;
+    const opacity = 0.5 + conf * 0.5;
+
+    // Apply to joints (skip index 0/nose which uses wireColor)
+    for (let i = 1; i < fig.joints.length; i++) {
+      const j = fig.joints[i];
+      j.material.color.setHSL(hue, saturation, lightness);
+      j.material.emissive.setHSL(hue, saturation, lightness * 0.3);
+      j.material.opacity = opacity;
+
+      // Halo glow intensity driven by confidence
+      if (j._haloMat) {
+        j._haloMat.color.setHSL(hue, saturation, lightness + 0.1);
+        j._haloMat.opacity = conf * 0.06 * this._settings.glow;
+      }
+      if (j._glow) {
+        j._glow.color.setHSL(hue, saturation, lightness);
+        j._glow.intensity = this._settings.glow * 0.15 * conf;
+      }
+    }
+
+    // Bones — slightly dimmer version
+    for (const bone of fig.bones) {
+      bone.mesh.material.color.setHSL(hue, saturation * 0.9, lightness * 0.9);
+      bone.mesh.material.emissive.setHSL(hue, saturation * 0.9, lightness * 0.2);
+      bone.mesh.material.opacity = 0.4 + conf * 0.5;
+    }
+
+    // Body segments
+    for (const seg of fig.bodySegments) {
+      if (!seg.isHead) {
+        seg.mat.color.setHSL(hue, saturation * 0.8, lightness * 0.7);
+        seg.mat.emissive.setHSL(hue, saturation * 0.8, lightness * 0.15);
+      }
+    }
+
+    // Head — slightly offset hue
+    const headJoint = fig.joints[0];
+    headJoint.material.color.setHSL(hue - 0.05, saturation, lightness + 0.1);
+    headJoint.material.emissive.setHSL(hue - 0.05, saturation, lightness * 0.4);
+    headJoint.material.opacity = 0.6 + conf * 0.4;
+  }
+
+  // ---- Vital signs animation ----
+
+  /**
+   * Animate heart rate pulse (chest glow) and breathing depth (abdomen scale).
+   * Heart rate: chest area glows that pulses at HR BPM rate.
+   * Breathing: abdomen Y-scale oscillates at breathing rate.
+   */
+  _updateVitalSigns(fig, elapsed, heartBpm, breathBpm, breathPulse) {
+    // Heart rate pulse — chest glow between shoulders and hips
+    if (fig.chestGlow && fig.chestGlowMat) {
+      if (heartBpm > 0) {
+        // Position at chest center (midpoint of shoulders)
+        const lShoulder = fig.joints[5].position;
+        const rShoulder = fig.joints[6].position;
+        const lHip = fig.joints[11].position;
+        const rHip = fig.joints[12].position;
+        const chestX = (lShoulder.x + rShoulder.x) / 2;
+        const chestY = (lShoulder.y + rShoulder.y + lHip.y + rHip.y) / 4 + 0.1;
+        const chestZ = (lShoulder.z + rShoulder.z) / 2;
+        fig.chestGlow.position.set(chestX, chestY, chestZ);
+
+        // Pulse at heart rate BPM — double-peak heartbeat pattern
+        const hrFreq = heartBpm / 60;
+        const hrPhase = elapsed * Math.PI * 2 * hrFreq;
+        // Simulate lub-dub with two peaks per cycle
+        const lub = Math.max(0, Math.sin(hrPhase));
+        const dub = Math.max(0, Math.sin(hrPhase * 2 + 0.5)) * 0.6;
+        const pulse = Math.max(lub, dub);
+
+        fig.chestGlowMat.opacity = pulse * 0.35;
+        fig.chestGlowMat.color.setHSL(0, 0.9, 0.35 + pulse * 0.3); // red heartbeat
+        const glowScale = 1.0 + pulse * 0.8;
+        fig.chestGlow.scale.setScalar(glowScale);
+      } else {
+        fig.chestGlowMat.opacity = 0;
+      }
+    }
+
+    // Breathing depth — abdomen Y-scale oscillation
+    if (fig.abdomenMesh && fig.abdomenMat) {
+      if (breathBpm > 0) {
+        // Position at abdomen (midpoint between hips, slightly up)
+        const lHip = fig.joints[11].position;
+        const rHip = fig.joints[12].position;
+        const abdX = (lHip.x + rHip.x) / 2;
+        const abdY = (lHip.y + rHip.y) / 2 + 0.12;
+        const abdZ = (lHip.z + rHip.z) / 2;
+        fig.abdomenMesh.position.set(abdX, abdY, abdZ);
+
+        // Breathing oscillation
+        const brFreq = breathBpm / 60;
+        const brPhase = Math.sin(elapsed * Math.PI * 2 * brFreq);
+        const breathDepth = (brPhase + 1) / 2; // 0 to 1
+
+        // Y-scale expands on inhale, contracts on exhale
+        fig.abdomenMesh.scale.set(
+          1.0 + breathDepth * 0.3,
+          0.8 + breathDepth * 0.6,
+          1.0 + breathDepth * 0.2
+        );
+        fig.abdomenMat.opacity = 0.08 + breathDepth * 0.15;
+        fig.abdomenMat.color.setHSL(0.52, 0.8, 0.3 + breathDepth * 0.25); // cyan breathing
+      } else {
+        fig.abdomenMat.opacity = 0;
+      }
+    }
+  }
+
   /**
    * Hide a figure by fading all materials to invisible.
    * @param {object} fig - Figure object to hide
@@ -510,7 +633,10 @@ export class FigurePool {
     for (const seg of fig.bodySegments) seg.mat.opacity = 0;
     fig.auraMat.opacity = 0;
     fig.personLight.intensity = 0;
+    if (fig.chestGlowMat) fig.chestGlowMat.opacity = 0;
+    if (fig.abdomenMat) fig.abdomenMat.opacity = 0;
     fig._initialized = false;
+    fig._confidence = 0;
   }
 
   /**

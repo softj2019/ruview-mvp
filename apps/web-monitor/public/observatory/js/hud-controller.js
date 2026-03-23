@@ -152,6 +152,10 @@ export class HudController {
     this._lerpBr = 0;
     this._lerpConf = 0;
 
+    // Vital sign animation state
+    this._hrPulsePhase = 0;
+    this._brPulsePhase = 0;
+
     // Track current scenario for description/edge updates
     this._currentScenarioKey = null;
   }
@@ -420,6 +424,42 @@ export class HudController {
     this._setBarColor('hr-bar', vitalColor('hr', this._lerpHr));
     this._setBarColor('br-bar', vitalColor('br', this._lerpBr));
     this._setBarColor('conf-bar', vitalColor('conf', this._lerpConf));
+
+    // Heart rate pulse animation on the HR value element
+    if (targetHr > 0) {
+      const hrFreq = targetHr / 60;
+      this._hrPulsePhase += 0.016 * Math.PI * 2 * hrFreq; // ~60fps frame step
+      const hrPulse = Math.max(0, Math.sin(this._hrPulsePhase));
+      const hrEl = document.getElementById('hr-value');
+      if (hrEl) {
+        const pulseScale = 1.0 + hrPulse * 0.08;
+        hrEl.style.transform = `scale(${pulseScale})`;
+        hrEl.style.textShadow = hrPulse > 0.5
+          ? `0 0 ${Math.round(hrPulse * 8)}px var(--red-heart)` : 'none';
+      }
+    } else {
+      this._hrPulsePhase = 0;
+      const hrEl = document.getElementById('hr-value');
+      if (hrEl) { hrEl.style.transform = 'scale(1)'; hrEl.style.textShadow = 'none'; }
+    }
+
+    // Breathing rate gentle pulse
+    if (targetBr > 0) {
+      const brFreq = targetBr / 60;
+      this._brPulsePhase += 0.016 * Math.PI * 2 * brFreq;
+      const brPulse = (Math.sin(this._brPulsePhase) + 1) / 2;
+      const brEl = document.getElementById('br-value');
+      if (brEl) {
+        const opacity = 0.7 + brPulse * 0.3;
+        brEl.style.opacity = `${opacity}`;
+      }
+    } else {
+      this._brPulsePhase = 0;
+    }
+
+    // CSI signal quality indicator
+    const csiQuality = Math.min(1, (feat.spectral_power || 0) + (feat.variance || 0) * 0.5);
+    this._setText('csi-quality-value', csiQuality > 0.01 ? `${Math.round(csiQuality * 100)}%` : '--');
 
     this._setText('rssi-value', `${Math.round(feat.mean_rssi || 0)} dBm`);
     this._setText('var-value', (feat.variance || 0).toFixed(2));
