@@ -15,6 +15,9 @@ export interface Device {
   n_persons?: number;
   breathing_bpm?: number;
   heart_rate?: number;
+  csi_breathing_bpm?: number;
+  csi_heart_rate?: number;
+  zone_id?: string;
 }
 
 interface DeviceState {

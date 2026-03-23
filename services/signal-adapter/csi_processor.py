@@ -33,6 +33,8 @@ class ProcessedCSI:
     heart_rate: float | None
     presence_score: float
     top_k_variance: list[float]
+    estimated_persons: int = 0
+    per_person_breathing: list[float] | None = None
 
 
 class WelfordStats:
@@ -70,6 +72,7 @@ class CSIProcessor:
     TOP_K = 8               # Top-K subcarriers to track
     SAMPLE_RATE = 20.0      # Approximate CSI frame rate (Hz)
     MIN_FRAMES_VITALS = 64  # Minimum frames before BPM estimation
+    CORR_THRESHOLD = 0.7    # Correlation threshold for same-person clustering
 
     def __init__(self):
         # Per-device state
@@ -79,6 +82,8 @@ class CSIProcessor:
         self._subcarrier_var: dict[str, list[WelfordStats]] = {}
         self._top_k: dict[str, list[int]] = {}
         self._frame_count: dict[str, int] = {}
+        # Per-subcarrier phase histories for multi-person separation
+        self._per_sc_phase: dict[str, dict[int, deque]] = {}
 
         # Butterworth filter coefficients (computed once)
         self._breath_sos = scipy_signal.butter(
@@ -132,6 +137,15 @@ class CSIProcessor:
             avg_phase = float(np.mean([phase[i] for i in top_k_indices if i < len(phase)]))
             self._phase_history[device_id].append(avg_phase)
 
+            # Store per-subcarrier phase for multi-person separation
+            if device_id not in self._per_sc_phase:
+                self._per_sc_phase[device_id] = {}
+            for sc_idx in top_k_indices:
+                if sc_idx < len(phase):
+                    if sc_idx not in self._per_sc_phase[device_id]:
+                        self._per_sc_phase[device_id][sc_idx] = deque(maxlen=self.BUFFER_SIZE)
+                    self._per_sc_phase[device_id][sc_idx].append(float(phase[sc_idx]))
+
         # Motion index
         motion_index = self._calc_motion_index(device_id)
 
@@ -148,6 +162,9 @@ class CSIProcessor:
             breathing_rate = self._extract_breathing(phase_arr)
             heart_rate = self._extract_heart_rate(phase_arr)
 
+        # Multi-person separation via subcarrier correlation clustering
+        estimated_persons, per_person_breathing = self._estimate_persons(device_id)
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -160,7 +177,86 @@ class CSIProcessor:
             heart_rate=heart_rate,
             presence_score=presence_score,
             top_k_variance=top_k_var,
+            estimated_persons=estimated_persons,
+            per_person_breathing=per_person_breathing,
         )
+
+    def _estimate_persons(self, device_id: str) -> tuple[int, list[float] | None]:
+        """Estimate person count via subcarrier correlation clustering.
+
+        Algorithm (ref: ruvnet/RuView Dynamic Min-Cut):
+        1. Build correlation matrix from Top-K subcarrier phase histories
+        2. Cluster correlated subcarriers (correlation > threshold = same person)
+        3. Extract per-cluster breathing rate independently
+        4. Return (person_count, per_person_breathing_rates)
+        """
+        sc_phases = self._per_sc_phase.get(device_id, {})
+        top_k = self._top_k.get(device_id, [])
+
+        # Need at least 2 subcarriers with sufficient history
+        active_scs = [sc for sc in top_k if sc in sc_phases and len(sc_phases[sc]) >= self.MIN_FRAMES_VITALS]
+        if len(active_scs) < 2:
+            return (0, None)
+
+        # Align histories to the same length (use the shortest)
+        min_len = min(len(sc_phases[sc]) for sc in active_scs)
+        histories = np.array([list(sc_phases[sc])[-min_len:] for sc in active_scs])
+        n_sc = len(active_scs)
+
+        # Step 1: Build correlation matrix
+        # Bandpass-filter each subcarrier in the breathing band before correlation
+        filtered = np.zeros_like(histories)
+        for i in range(n_sc):
+            try:
+                filtered[i] = scipy_signal.sosfiltfilt(self._breath_sos, histories[i])
+            except Exception:
+                filtered[i] = histories[i]
+
+        corr_matrix = np.corrcoef(filtered)
+        # Handle NaN from constant signals
+        corr_matrix = np.nan_to_num(corr_matrix, nan=0.0)
+
+        # Step 2: Threshold-based clustering (union-find)
+        # Two subcarriers with correlation > threshold belong to the same person
+        parent = list(range(n_sc))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        for i in range(n_sc):
+            for j in range(i + 1, n_sc):
+                if abs(corr_matrix[i, j]) > self.CORR_THRESHOLD:
+                    union(i, j)
+
+        # Collect clusters
+        clusters: dict[int, list[int]] = {}
+        for i in range(n_sc):
+            root = find(i)
+            clusters.setdefault(root, []).append(i)
+
+        # Step 3: Extract breathing rate per cluster
+        per_person_breathing: list[float] = []
+        for members in clusters.values():
+            # Average the filtered signals within the cluster
+            cluster_signal = np.mean(filtered[members], axis=0)
+            bpm = self._extract_breathing(cluster_signal)
+            if bpm is not None:
+                per_person_breathing.append(bpm)
+
+        # Person count = number of clusters that have a detectable breathing rate
+        # If no breathing detected in any cluster, fall back to cluster count
+        # only if overall presence_score suggests someone is there
+        estimated_persons = len(per_person_breathing) if per_person_breathing else 0
+
+        return (estimated_persons, per_person_breathing if per_person_breathing else None)
 
     def _unwrap_phase(self, device_id: str, phase_raw: np.ndarray) -> np.ndarray:
         """Phase unwrapping — remove 2π discontinuities.

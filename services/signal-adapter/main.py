@@ -27,19 +27,60 @@ load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
 
 UDP_HOST = os.getenv("CSI_UDP_HOST", "0.0.0.0")
 UDP_PORT = int(os.getenv("CSI_UDP_PORT", os.getenv("ESP_TARGET_PORT", "5005")))
-DEFAULT_ZONE = {
-    "id": "zone-main",
-    "name": "Main Zone",
-    "polygon": [
-        {"x": 80, "y": 80},
-        {"x": 720, "y": 80},
-        {"x": 720, "y": 420},
-        {"x": 80, "y": 420},
-    ],
-    "status": "active",
-    "presenceCount": 0,
-    "lastActivity": None,
-}
+DEFAULT_ZONES = [
+    {
+        "id": "zone-1001",
+        "name": "Room 1001",
+        "polygon": [
+            {"x": 20, "y": 20},
+            {"x": 210, "y": 20},
+            {"x": 210, "y": 380},
+            {"x": 20, "y": 380},
+        ],
+        "status": "active",
+        "presenceCount": 0,
+        "lastActivity": None,
+    },
+    {
+        "id": "zone-1002",
+        "name": "Room 1002",
+        "polygon": [
+            {"x": 210, "y": 20},
+            {"x": 400, "y": 20},
+            {"x": 400, "y": 380},
+            {"x": 210, "y": 380},
+        ],
+        "status": "active",
+        "presenceCount": 0,
+        "lastActivity": None,
+    },
+    {
+        "id": "zone-1003",
+        "name": "Room 1003",
+        "polygon": [
+            {"x": 400, "y": 20},
+            {"x": 590, "y": 20},
+            {"x": 590, "y": 380},
+            {"x": 400, "y": 380},
+        ],
+        "status": "active",
+        "presenceCount": 0,
+        "lastActivity": None,
+    },
+    {
+        "id": "zone-1004",
+        "name": "Room 1004",
+        "polygon": [
+            {"x": 590, "y": 20},
+            {"x": 780, "y": 20},
+            {"x": 780, "y": 380},
+            {"x": 590, "y": 380},
+        ],
+        "status": "active",
+        "presenceCount": 0,
+        "lastActivity": None,
+    },
+]
 DEVICE_POSITIONS = [
     (60, 330),    # Node 1 — A5 (1001호 좌하)
     (60, 80),     # Node 2 — A2 (1001호 좌상)
@@ -71,13 +112,35 @@ def avg(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
 
 
+def _zone_center(zone: dict[str, Any]) -> tuple[float, float]:
+    """Compute the center of a zone polygon."""
+    poly = zone["polygon"]
+    cx = sum(p["x"] for p in poly) / len(poly)
+    cy = sum(p["y"] for p in poly) / len(poly)
+    return cx, cy
+
+
+def assign_device_zone(device: dict[str, Any], zones: list[dict[str, Any]]) -> str:
+    """Return the zone id whose center is closest to the device position."""
+    dx, dy = device.get("x", 0), device.get("y", 0)
+    best_id = zones[0]["id"]
+    best_dist = float("inf")
+    for z in zones:
+        cx, cy = _zone_center(z)
+        dist = (dx - cx) ** 2 + (dy - cy) ** 2
+        if dist < best_dist:
+            best_dist = dist
+            best_id = z["id"]
+    return best_id
+
+
 class SignalAdapterRuntime:
     def __init__(self) -> None:
         self.manager = ConnectionManager()
         self.csi_processor = CSIProcessor()
         self.event_engine = EventEngine()
         self.devices: dict[str, dict[str, Any]] = {}
-        self.zones: list[dict[str, Any]] = [dict(DEFAULT_ZONE)]
+        self.zones: list[dict[str, Any]] = [dict(z) for z in DEFAULT_ZONES]
         self.transport = None
 
     def device_key(self, node_id: int) -> str:
@@ -241,7 +304,44 @@ class SignalAdapterRuntime:
             if csi_br and 8 <= csi_br <= 25 and csi_hr and 50 <= csi_hr <= 100:
                 nodes_breathing += 1
 
-        return max(camera, fused, nodes_with_presence, nodes_breathing)
+        # CSI subcarrier clustering person estimate (multi-person separation)
+        # Use the max across nodes — each node sees its local area
+        csi_person_max = 0
+        for dev in self.devices.values():
+            if dev.get("status") != "online":
+                continue
+            csi_persons = dev.get("csi_estimated_persons", 0)
+            if csi_persons > csi_person_max:
+                csi_person_max = csi_persons
+
+        total = max(camera, fused, nodes_with_presence, nodes_breathing, csi_person_max)
+
+        # --- Per-zone presence counts ---
+        self._recompute_zone_presence()
+
+        return total
+
+    def _recompute_zone_presence(self) -> None:
+        """Assign each online device to its closest zone and set per-zone presenceCount."""
+        zone_counts: dict[str, int] = {z["id"]: 0 for z in self.zones}
+
+        for dev in self.devices.values():
+            if dev.get("status") != "online":
+                continue
+            zone_id = assign_device_zone(dev, self.zones)
+            dev["zone_id"] = zone_id
+
+            # Count presence signals per zone
+            if dev.get("n_persons", 0) > 0:
+                zone_counts[zone_id] += dev["n_persons"]
+            elif dev.get("_presence_z", 0) > 0:
+                zone_counts[zone_id] += 1
+            elif dev.get("csi_breathing_bpm") and 8 <= dev["csi_breathing_bpm"] <= 25:
+                zone_counts[zone_id] += 1
+
+        for z in self.zones:
+            if not z.get("_manual_override"):
+                z["presenceCount"] = zone_counts.get(z["id"], 0)
 
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
@@ -284,9 +384,8 @@ class SignalAdapterRuntime:
                 changed = True
         if changed:
             await self.broadcast_devices()
-            if not self.zones[0].get("_manual_override"):
-                self.zones[0]["presenceCount"] = self._recompute_presence_count()
-                await self.broadcast_zones()
+            self._recompute_presence_count()
+            await self.broadcast_zones()
 
     async def broadcast_devices(self) -> None:
         await self.broadcast("device_update", {"devices": list(self.devices.values())})
@@ -297,6 +396,8 @@ class SignalAdapterRuntime:
     async def handle_processed(self, processed: ProcessedCSI) -> None:
         events = self.event_engine.evaluate(processed)
 
+        # Include breathing and heart rate in signal payload for chart
+        dev = self.devices.get(processed.device_id, {})
         signal_payload = {
             "device_id": processed.device_id,
             "time": processed.timestamp[11:19] if len(processed.timestamp) >= 19 else processed.timestamp,
@@ -304,6 +405,8 @@ class SignalAdapterRuntime:
             "snr": round(processed.rssi - processed.noise_floor, 1),
             "csi_amplitude": round(avg(processed.amplitude), 2),
             "motion_index": round(processed.motion_index, 3),
+            "breathing_rate": round(dev.get("breathing_bpm", 0) or 0, 1),
+            "heart_rate": round(dev.get("heart_rate", 0) or 0, 1),
         }
         await self.broadcast("signal", signal_payload)
 
@@ -349,11 +452,22 @@ class SignalAdapterRuntime:
             }
         )
 
-        self.zones[0]["lastActivity"] = processed.timestamp
+        # Assign device to closest zone and update zone lastActivity
+        device_zone_id = assign_device_zone(device, self.zones)
+        device["zone_id"] = device_zone_id
+        for z in self.zones:
+            if z["id"] == device_zone_id:
+                z["lastActivity"] = processed.timestamp
+                break
 
         # Track per-device CSI metrics
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.presence_score
+
+        # Multi-person separation from CSI subcarrier clustering
+        if processed.estimated_persons > 0:
+            device["csi_estimated_persons"] = processed.estimated_persons
+            device["csi_per_person_breathing"] = processed.per_person_breathing
 
         # Server-side vitals extraction (supplement firmware vitals)
         if processed.breathing_rate is not None:
@@ -366,8 +480,8 @@ class SignalAdapterRuntime:
         if device.get("heart_rate", 0) == 0 and processed.heart_rate:
             device["heart_rate"] = processed.heart_rate
 
-        if not self.zones[0].get("_manual_override"):
-            self.zones[0]["presenceCount"] = self._recompute_presence_count()
+        # Recompute presence for all zones
+        self._recompute_presence_count()
 
         await self.broadcast_devices()
         await self.broadcast_zones()
@@ -398,11 +512,16 @@ class SignalAdapterRuntime:
         device["breathing_bpm"] = breathing_bpm
         device["heart_rate"] = heart_rate
 
-        # Multi-node fusion: aggregate person estimates from all nodes
-        # Skip if manual override is active
-        if not self.zones[0].get("_manual_override"):
-            self.zones[0]["presenceCount"] = self._recompute_presence_count()
-        self.zones[0]["lastActivity"] = iso_now()
+        # Assign device to closest zone
+        device_zone_id = assign_device_zone(device, self.zones)
+        device["zone_id"] = device_zone_id
+
+        # Multi-node fusion: aggregate person estimates per zone
+        self._recompute_presence_count()
+        for z in self.zones:
+            if z["id"] == device_zone_id:
+                z["lastActivity"] = iso_now()
+                break
         await self.broadcast_devices()
         await self.broadcast_zones()
 
@@ -423,7 +542,7 @@ class SignalAdapterRuntime:
                 "id": f"{node_id}-{int(datetime.now().timestamp() * 1000)}",
                 "type": "fall_suspected",
                 "severity": "critical",
-                "zone": "zone-main",
+                "zone": device.get("zone_id", "zone-1001"),
                 "deviceId": self.device_key(node_id),
                 "confidence": min(max(motion_energy / 5.0, 0.6), 0.99),
                 "timestamp": iso_now(),

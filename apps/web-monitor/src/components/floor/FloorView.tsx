@@ -34,12 +34,44 @@ function motionColor(intensity: number): string {
   return `rgba(239,68,68,${Math.min(clamped * 0.6, 0.7)})`;
 }
 
+// Zone ID to room ID mapping
+const ZONE_ROOM_MAP: Record<string, string> = {
+  'zone-1001': '1001',
+  'zone-1002': '1002',
+  'zone-1003': '1003',
+  'zone-1004': '1004',
+};
+
+function presenceColor(count: number): string {
+  if (count === 0) return 'rgba(34,197,94,0.15)';   // green
+  if (count <= 2) return 'rgba(250,204,21,0.2)';    // yellow
+  if (count <= 4) return 'rgba(249,115,22,0.25)';   // orange
+  return 'rgba(239,68,68,0.3)';                      // red
+}
+
+function presenceStroke(count: number): string {
+  if (count === 0) return '#22c55e';
+  if (count <= 2) return '#eab308';
+  if (count <= 4) return '#f97316';
+  return '#ef4444';
+}
+
 export default function FloorView() {
   const svgRef = useRef<SVGSVGElement>(null);
   const devices = useDeviceStore((s) => s.devices);
   const updateDevice = useDeviceStore((s) => s.updateDevice);
   const zones = useZoneStore((s) => s.zones);
-  const presenceCount = zones[0]?.presenceCount ?? 0;
+  const presenceCount = zones.reduce((sum, z) => sum + (z.presenceCount ?? 0), 0);
+
+  // Build per-room presence counts from zones
+  const roomPresence = useMemo(() => {
+    const map: Record<string, number> = {};
+    for (const z of zones) {
+      const roomId = ZONE_ROOM_MAP[z.id];
+      if (roomId) map[roomId] = z.presenceCount ?? 0;
+    }
+    return map;
+  }, [zones]);
 
   // Drag state
   const [dragging, setDragging] = useState<string | null>(null);
@@ -173,29 +205,44 @@ export default function FloorView() {
         <rect x="15" y="15" width={FLOOR_WIDTH - 30} height={FLOOR_HEIGHT - 30}
           fill="none" stroke="#374151" strokeWidth="2" rx="2" />
 
-        {/* Rooms */}
-        {ROOMS.map((room) => (
-          <g key={room.id}>
-            <rect
-              x={room.x} y={room.y} width={room.w} height={room.h}
-              fill="rgba(30,41,59,0.3)"
-              stroke="#334155"
-              strokeWidth="1.5"
-              rx="1"
-            />
-            <text
-              x={room.x + room.w / 2}
-              y={room.y + room.h / 2}
-              textAnchor="middle"
-              dominantBaseline="middle"
-              fill="#475569"
-              fontSize="16"
-              fontWeight="600"
-            >
-              {room.label}
-            </text>
-          </g>
-        ))}
+        {/* Rooms — colored by zone presenceCount */}
+        {ROOMS.map((room) => {
+          const count = roomPresence[room.id] ?? 0;
+          return (
+            <g key={room.id}>
+              <rect
+                x={room.x} y={room.y} width={room.w} height={room.h}
+                fill={presenceColor(count)}
+                stroke={presenceStroke(count)}
+                strokeWidth="1.5"
+                rx="1"
+              />
+              <text
+                x={room.x + room.w / 2}
+                y={room.y + room.h / 2 - 10}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill="#94a3b8"
+                fontSize="16"
+                fontWeight="600"
+              >
+                {room.label}
+              </text>
+              {/* Per-zone person count label */}
+              <text
+                x={room.x + room.w / 2}
+                y={room.y + room.h / 2 + 14}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                fill={count > 0 ? presenceStroke(count) : '#475569'}
+                fontSize="13"
+                fontWeight="700"
+              >
+                {count > 0 ? `${count}명` : '--'}
+              </text>
+            </g>
+          );
+        })}
 
         {/* Doors */}
         {DOORS.map((door, i) => (
