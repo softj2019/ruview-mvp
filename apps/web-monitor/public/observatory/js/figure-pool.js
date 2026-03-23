@@ -248,13 +248,41 @@ export class FigurePool {
       velocities.push(new THREE.Vector3(0, 0, 0));
     }
 
+    // Chest glow mesh for heart rate pulse visualization
+    const chestGlowGeo = new THREE.SphereGeometry(0.1, 10, 10);
+    const chestGlowMat = new THREE.MeshBasicMaterial({
+      color: 0xff4060,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const chestGlow = new THREE.Mesh(chestGlowGeo, chestGlowMat);
+    chestGlow.name = 'chest-hr-glow';
+    group.add(chestGlow);
+
+    // Abdomen scale mesh for breathing depth visualization
+    const abdomenGeo = new THREE.SphereGeometry(0.08, 8, 8);
+    const abdomenMat = new THREE.MeshBasicMaterial({
+      color: 0x00ccff,
+      transparent: true,
+      opacity: 0,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const abdomenMesh = new THREE.Mesh(abdomenGeo, abdomenMat);
+    abdomenMesh.name = 'abdomen-breath';
+    group.add(abdomenMesh);
+
     return {
       group, joints, bones, bodySegments, aura, auraMat, personLight,
+      chestGlow, chestGlowMat, abdomenMesh, abdomenMat,
       visible: false,
       prevPositions,
       velocities,
       _initialized: false,
       _lastPose: null,
+      _confidence: 0,
     };
   }
 
@@ -268,8 +296,11 @@ export class FigurePool {
   update(data, elapsed) {
     const persons = data?.persons || [];
     const vs = data?.vital_signs || {};
-    const isPresent = data?.classification?.presence || false;
+    const cls = data?.classification || {};
+    const isPresent = cls.presence || false;
+    const confidence = cls.confidence || 0;
     const breathBpm = vs.breathing_rate_bpm || 0;
+    const heartBpm = vs.heart_rate_bpm || 0;
     const breathPulse = breathBpm > 0
       ? Math.sin(elapsed * Math.PI * 2 * (breathBpm / 60)) * 0.012
       : 0;
@@ -278,8 +309,11 @@ export class FigurePool {
       const fig = this._figures[f];
       if (f < persons.length && isPresent) {
         const p = persons[f];
+        fig._confidence = confidence;
         const kps = this._poseSystem.generateKeypoints(p, elapsed, breathPulse);
         this.applyKeypoints(fig, kps, breathPulse, p.position || [0, 0, 0], elapsed, p.pose);
+        this._applyConfidenceColoring(fig, confidence);
+        this._updateVitalSigns(fig, elapsed, heartBpm, breathBpm, breathPulse);
         fig.visible = true;
       } else {
         if (fig.visible) {

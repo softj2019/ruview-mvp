@@ -110,6 +110,8 @@ class Observatory {
     this._buildParticleTrail();
     this._buildWifiWaves();
     this._buildSignalField();
+    this._buildCSIHeatmapPanel();
+    this._buildSignalFieldFloor();
 
     // Post-processing
     this._postProcessing = new PostProcessing(this._renderer, this._scene, this._camera);
@@ -707,6 +709,8 @@ class Observatory {
     this._updateParticleTrail(data, dt, elapsed);
     this._updateWifiWaves(elapsed);
     this._updateSignalField(data);
+    this._updateCSIHeatmapPanel(data, elapsed);
+    this._updateSignalFieldFloor(data, elapsed);
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);
 
@@ -860,6 +864,218 @@ class Observatory {
     }
     this._fieldPoints.geometry.attributes.color.needsUpdate = true;
     this._fieldPoints.geometry.attributes.size.needsUpdate = true;
+  }
+
+  // ========================================
+  // CSI AMPLITUDE HEATMAP PANEL
+  // ========================================
+
+  _buildCSIHeatmapPanel() {
+    // Floating holographic panel showing CSI amplitude heatmap
+    // 30 subcarriers x 40 time slots, rendered via canvas texture
+    this._csiGroup = new THREE.Group();
+    this._csiGroup.name = 'csi-heatmap-panel';
+    this._csiGroup.position.set(-5.2, 3.2, -3.5);
+    // Slight tilt for holographic look
+    this._csiGroup.rotation.y = 0.3;
+    this._csiGroup.rotation.x = -0.05;
+
+    const panelW = 2.4;
+    const panelH = 1.6;
+
+    // Canvas for heatmap texture
+    this._csiCanvas = document.createElement('canvas');
+    this._csiCanvas.width = 300;  // 30 subcarriers * 10px
+    this._csiCanvas.height = 400; // 40 time slots * 10px
+    this._csiCtx = this._csiCanvas.getContext('2d');
+    this._csiCtx.fillStyle = '#000011';
+    this._csiCtx.fillRect(0, 0, 300, 400);
+
+    this._csiTexture = new THREE.CanvasTexture(this._csiCanvas);
+    this._csiTexture.minFilter = THREE.LinearFilter;
+    this._csiTexture.magFilter = THREE.LinearFilter;
+
+    // Main heatmap plane
+    const planeGeo = new THREE.PlaneGeometry(panelW, panelH);
+    const planeMat = new THREE.MeshBasicMaterial({
+      map: this._csiTexture,
+      transparent: true,
+      opacity: 0.88,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    const heatmapPlane = new THREE.Mesh(planeGeo, planeMat);
+    this._csiGroup.add(heatmapPlane);
+
+    // Border frame for holographic feel
+    const frameGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(panelW + 0.08, panelH + 0.08));
+    const frameMat = new THREE.LineBasicMaterial({ color: 0x2090ff, opacity: 0.5, transparent: true });
+    const frame = new THREE.LineSegments(frameGeo, frameMat);
+    frame.position.z = 0.001;
+    this._csiGroup.add(frame);
+
+    // Title label
+    const titleSprite = this._createHoloLabel('CSI AMPLITUDE', 0x5588cc);
+    titleSprite.position.set(0, panelH / 2 + 0.15, 0);
+    titleSprite.scale.set(1.2, 0.2, 1);
+    this._csiGroup.add(titleSprite);
+
+    // Axis labels
+    const subLabel = this._createHoloLabel('SUBCARRIER', 0x446688);
+    subLabel.position.set(0, -panelH / 2 - 0.12, 0);
+    subLabel.scale.set(0.9, 0.15, 1);
+    this._csiGroup.add(subLabel);
+
+    const timeLabel = this._createHoloLabel('TIME', 0x446688);
+    timeLabel.position.set(-panelW / 2 - 0.2, 0, 0);
+    timeLabel.scale.set(0.5, 0.15, 1);
+    this._csiGroup.add(timeLabel);
+
+    this._scene.add(this._csiGroup);
+
+    // Amplitude history ring buffer
+    this._csiAmplitudeHistory = [];
+    for (let i = 0; i < 40; i++) {
+      this._csiAmplitudeHistory.push(new Float32Array(30));
+    }
+    this._csiTimeIndex = 0;
+  }
+
+  _createHoloLabel(text, color) {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    canvas.width = 256;
+    canvas.height = 48;
+    ctx.font = '13px monospace';
+    ctx.fillStyle = `#${color.toString(16).padStart(6, '0')}`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(text, 128, 24);
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.needsUpdate = true;
+    const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false });
+    return new THREE.Sprite(mat);
+  }
+
+  _updateCSIHeatmapPanel(data, elapsed) {
+    if (!this._csiGroup) return;
+
+    // Generate CSI amplitude from signal data or synthesize from features
+    const amplitude = new Float32Array(30);
+    const feat = data?.features || {};
+    const motionPower = feat.motion_band_power || 0;
+    const variance = feat.variance || 0;
+
+    for (let s = 0; s < 30; s++) {
+      // Synthesize amplitude from scene data, mimicking real CSI patterns
+      const baseFreq = Math.sin(elapsed * 2.0 + s * 0.3) * 0.25;
+      const bodyEffect = Math.sin(elapsed * 0.8 + s * 0.15) * variance * 0.5;
+      const noise = (Math.random() - 0.5) * 0.06;
+      amplitude[s] = Math.max(0, Math.min(1, 0.3 + motionPower * 0.4 + baseFreq + bodyEffect + noise));
+    }
+
+    // Shift history and add new row
+    this._csiAmplitudeHistory.shift();
+    this._csiAmplitudeHistory.push(new Float32Array(amplitude));
+
+    // Render heatmap to canvas
+    const ctx = this._csiCtx;
+    const cellW = 10; // 300 / 30
+    const cellH = 10; // 400 / 40
+
+    for (let t = 0; t < 40; t++) {
+      const row = this._csiAmplitudeHistory[t];
+      for (let s = 0; s < 30; s++) {
+        const val = row[s] || 0;
+        // Color: blue(quiet) -> cyan -> green -> yellow -> red(active)
+        // HSL hue: 0.6 (blue) -> 0 (red)
+        const hue = 0.6 - val * 0.6;
+        const sat = 0.9;
+        const light = 0.08 + val * 0.52;
+        ctx.fillStyle = `hsl(${Math.round(hue * 360)}, ${Math.round(sat * 100)}%, ${Math.round(light * 100)}%)`;
+        ctx.fillRect(s * cellW, (39 - t) * cellH, cellW, cellH);
+      }
+    }
+
+    this._csiTexture.needsUpdate = true;
+
+    // Subtle panel float animation
+    this._csiGroup.position.y = 3.2 + Math.sin(elapsed * 0.7) * 0.05;
+  }
+
+  // ========================================
+  // SIGNAL FIELD FLOOR (Gaussian Splat-like)
+  // ========================================
+
+  _buildSignalFieldFloor() {
+    // 20x20 grid of small spheres on the floor, colored by signal field values
+    // Inspired by gaussian-splats.js floor rendering
+    const gridSize = 20;
+    const count = gridSize * gridSize;
+    this._floorSpheres = [];
+    this._floorGroup = new THREE.Group();
+    this._floorGroup.name = 'signal-field-floor';
+
+    const sphereGeo = new THREE.SphereGeometry(0.08, 8, 8);
+
+    for (let iz = 0; iz < gridSize; iz++) {
+      for (let ix = 0; ix < gridSize; ix++) {
+        const mat = new THREE.MeshBasicMaterial({
+          color: 0x0a1428,
+          transparent: true,
+          opacity: 0.15,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        });
+        const sphere = new THREE.Mesh(sphereGeo, mat);
+        sphere.position.set(
+          (ix - gridSize / 2) * 0.6 + 0.3,
+          0.04,
+          (iz - gridSize / 2) * 0.5 + 0.25
+        );
+        this._floorGroup.add(sphere);
+        this._floorSpheres.push(sphere);
+      }
+    }
+
+    this._scene.add(this._floorGroup);
+  }
+
+  _updateSignalFieldFloor(data, elapsed) {
+    if (!this._floorSpheres) return;
+    const field = data?.signal_field?.values;
+    const motionPower = data?.features?.motion_band_power || 0;
+    const count = this._floorSpheres.length;
+
+    for (let i = 0; i < count; i++) {
+      const sphere = this._floorSpheres[i];
+      // Use signal field data if available, otherwise generate from features
+      let v = field ? (field[i] || 0) : 0.05;
+
+      // Color: blue(quiet) -> cyan -> green -> yellow -> red(active)
+      // Same color scheme as gaussian-splats.js valueToColor
+      let r, g, b;
+      if (v < 0.5) {
+        const t = v * 2;
+        r = 0; g = t; b = 1 - t;
+      } else {
+        const t = (v - 0.5) * 2;
+        r = t; g = 1 - t; b = 0;
+      }
+      sphere.material.color.setRGB(r, g, b);
+
+      // Opacity based on signal strength
+      sphere.material.opacity = 0.1 + v * 0.5;
+
+      // Pulsate based on motion energy
+      const pulseFactor = 1 + Math.sin(elapsed * 2.5 + i * 0.15) * motionPower * 0.6;
+      const baseScale = 0.6 + v * 1.8;
+      sphere.scale.setScalar(baseScale * pulseFactor);
+
+      // Y-offset pulsation for active areas
+      sphere.position.y = 0.04 + v * Math.sin(elapsed * 1.8 + i * 0.1) * 0.03;
+    }
   }
 
   // ---- FPS ----
