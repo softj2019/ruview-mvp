@@ -8,6 +8,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
+import numpy as np
+
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -394,23 +396,25 @@ class SignalAdapterRuntime:
         device["signalStrength"] = rssi
         device["lastSeen"] = iso_now()
 
+        # Fast I/Q parsing via numpy (replaces per-element struct.unpack)
         pairs = min(n_subcarriers, len(iq_bytes) // 2)
-        csi_data = [
-            complex(
-                struct.unpack_from("<b", iq_bytes, index * 2)[0],
-                struct.unpack_from("<b", iq_bytes, index * 2 + 1)[0],
-            )
-            for index in range(pairs)
-        ]
+        if pairs > 0:
+            iq_arr = np.frombuffer(iq_bytes[:pairs * 2], dtype=np.int8)
+            csi_data = (iq_arr[0::2] + 1j * iq_arr[1::2]).tolist()
+        else:
+            csi_data = []
 
-        processed = self.csi_processor.process(
+        loop = asyncio.get_running_loop()
+        processed = await loop.run_in_executor(
+            None,
+            self.csi_processor.process,
             {
                 "device_id": device["id"],
                 "timestamp": iso_now(),
                 "csi_data": csi_data,
                 "rssi": float(rssi),
                 "noise_floor": float(noise_floor),
-            }
+            },
         )
 
         # Assign device to closest zone and update zone lastActivity
@@ -448,13 +452,13 @@ class SignalAdapterRuntime:
         # Recompute presence for all zones
         self._recompute_presence_count()
 
-        # Throttled broadcast: max once per 200ms to prevent event loop saturation
+        # Throttled broadcast: max once per 500ms to keep event loop responsive
         now = _time.monotonic()
-        if now - self._last_broadcast_time >= self._broadcast_interval:
+        if now - self._last_broadcast_time >= 0.5:
             self._last_broadcast_time = now
             await self.broadcast_devices()
             await self.broadcast_zones()
-        await self.handle_processed(processed)
+            await self.handle_processed(processed)
 
     async def handle_vitals_frame(self, data: bytes, addr: tuple[str, int]) -> None:
         if len(data) < 24:
@@ -540,7 +544,7 @@ class UDPProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr) -> None:
         # asyncio is single-threaded so plain counter is safe (no TOCTOU race)
-        if self._active_tasks >= 8:
+        if self._active_tasks >= 2:
             return  # Drop frame under backpressure
         self._active_tasks += 1
         self.loop.create_task(self._handle(data, addr))
