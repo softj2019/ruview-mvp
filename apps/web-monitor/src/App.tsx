@@ -23,8 +23,7 @@ function getWsUrl(): string {
 
   // Cloudflare Pages deployment — connect to relay Worker
   if (hostname.includes('pages.dev') || hostname.includes('workers.dev')) {
-    const relayHost = hostname.replace('ruview-monitor.pages.dev', 'ruview-relay.YOUR_SUBDOMAIN.workers.dev');
-    return `wss://${relayHost}/api/front/ws?session=default`;
+    return 'wss://ruview-relay.dev-softj.workers.dev/api/front/ws?session=default';
   }
 
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -48,10 +47,10 @@ function DataProvider({ children }: { children: React.ReactNode }) {
           if (msg.payload.zones) setZones(msg.payload.zones as Zone[]);
           break;
         case 'event':
-          addEvent(msg.payload as DetectionEvent);
+          addEvent(msg.payload as unknown as DetectionEvent);
           break;
         case 'signal':
-          addSignalPoint(msg.payload as SignalPoint);
+          addSignalPoint(msg.payload as unknown as SignalPoint);
           break;
         case 'device_update':
           if (msg.payload.devices) setDevices(msg.payload.devices as Device[]);

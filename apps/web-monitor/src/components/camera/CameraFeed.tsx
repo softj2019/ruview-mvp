@@ -20,7 +20,7 @@ export default function CameraFeed() {
   const [zoom, setZoom] = useState(1.0);
   const imgRef = useRef<HTMLImageElement>(null);
   const zones = useZoneStore((s) => s.zones);
-  const cameraPersonCount = (zones[0] as Record<string, unknown>)?.camera_person_count as number | undefined;
+  const cameraPersonCount = (zones[0] as unknown as Record<string, unknown>)?.camera_person_count as number | undefined;
 
   const handleZoom = useCallback(async (delta: number) => {
     const newZoom = Math.max(1.0, Math.min(5.0, zoom + delta));

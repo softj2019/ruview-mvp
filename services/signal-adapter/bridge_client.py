@@ -67,7 +67,7 @@ class BridgeClient:
                     headers["Authorization"] = f"Bearer {self.token}"
 
                 print(f"[bridge] Connecting to {ws_url}...")
-                async with websockets.connect(ws_url, extra_headers=headers) as ws:
+                async with websockets.connect(ws_url, additional_headers=headers) as ws:
                     self._ws = ws
                     self._connected = True
                     self._reconnect_delay = RECONNECT_BASE_S

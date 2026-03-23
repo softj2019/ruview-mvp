@@ -584,6 +584,7 @@ async def lifespan(app: FastAPI):
     bridge_url = os.getenv("RUVIEW_BRIDGE_URL")
     bridge_session = os.getenv("RUVIEW_BRIDGE_SESSION", "default")
     bridge_token = os.getenv("RUVIEW_BRIDGE_TOKEN")
+    print(f"[signal-adapter] Bridge URL: {bridge_url}")
     if bridge_url:
         from bridge_client import BridgeClient
         runtime.bridge = BridgeClient(bridge_url, bridge_session, bridge_token)
