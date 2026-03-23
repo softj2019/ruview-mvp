@@ -19,10 +19,12 @@ RECONNECT_MAX_S = 32.0
 
 
 class BridgeClient:
-    def __init__(self, url: str, session_id: str, token: str | None = None):
+    def __init__(self, url: str, session_id: str, token: str | None = None,
+                 on_connected: "callable | None" = None):
         self.url = url
         self.session_id = session_id
         self.token = token
+        self.on_connected = on_connected  # Called when bridge connects
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._reconnect_delay = RECONNECT_BASE_S
         self._stopped = False
@@ -72,6 +74,16 @@ class BridgeClient:
                     self._connected = True
                     self._reconnect_delay = RECONNECT_BASE_S
                     print(f"[bridge] Connected to Cloudflare relay")
+
+                    # Send initial state to front clients
+                    if self.on_connected:
+                        try:
+                            init_data = await self.on_connected()
+                            if init_data:
+                                await ws.send(init_data)
+                                print(f"[bridge] Sent init state to relay")
+                        except Exception:
+                            pass
 
                     async for message in ws:
                         # Front → Agent messages (commands from external browser)

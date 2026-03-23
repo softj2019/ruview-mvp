@@ -587,7 +587,22 @@ async def lifespan(app: FastAPI):
     print(f"[signal-adapter] Bridge URL: {bridge_url}")
     if bridge_url:
         from bridge_client import BridgeClient
-        runtime.bridge = BridgeClient(bridge_url, bridge_session, bridge_token)
+
+        async def _bridge_on_connected():
+            """Send full state when bridge connects (for external front clients)."""
+            return json.dumps({
+                "type": "init",
+                "payload": {
+                    "devices": list(runtime.devices.values()),
+                    "zones": runtime.zones,
+                },
+                "timestamp": iso_now(),
+            })
+
+        runtime.bridge = BridgeClient(
+            bridge_url, bridge_session, bridge_token,
+            on_connected=_bridge_on_connected,
+        )
         await runtime.bridge.start()
         print(f"[signal-adapter] Bridge connected to {bridge_url}")
 
