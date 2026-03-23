@@ -171,46 +171,77 @@ class SignalAdapterRuntime:
         return max(1, round(math.log2(1 + total_delta) * nodes_with_presence / 2))
 
     def _recompute_presence_count(self) -> int:
-        """Fuse vitals n_persons, breathing changes, and camera.
+        """Fuse vitals n_persons, Welford z-score presence, and camera.
 
-        Empty rooms produce false breathing (16-25 BPM from WiFi noise).
-        Use adaptive breathing baseline: track per-node breathing BPM,
-        significant change from baseline indicates real person.
+        Uses three presence indicators with priority:
+        1. Camera person count (most accurate when available)
+        2. Firmware vitals n_persons (requires calibration)
+        3. Welford z-score on CSI presence_score (server-side, adaptive)
+
+        Welford z-score approach (ref: edge_processing.c adaptive calibration):
+        - First 60 samples: learn baseline presence_score per node
+        - After calibration: z > 3.0 = human presence detected
+        - More robust than breathing baseline (no false positives from WiFi noise)
         """
         camera = self.zones[0].get("camera_person_count", 0)
         fused = self._fuse_person_count()
 
-        # Adaptive breathing baseline
-        if not hasattr(self, "_breath_baseline"):
-            self._breath_baseline = {}
-            self._breath_samples = {}
+        # Welford z-score presence detection
+        if not hasattr(self, "_presence_welford"):
+            self._presence_welford = {}
 
-        nodes_with_real_breathing = 0
+        nodes_with_presence = 0
         for dev in self.devices.values():
             if dev.get("status") != "online":
                 continue
             did = dev["id"]
-            bpm = dev.get("breathing_bpm", 0)
-            if bpm <= 0:
+            score = dev.get("presence_score", 0)
+            if score <= 0:
                 continue
 
-            # Collect baseline samples (first 30)
-            if did not in self._breath_samples:
-                self._breath_samples[did] = []
-            samples = self._breath_samples[did]
-            if len(samples) < 30:
-                samples.append(bpm)
-                if len(samples) == 30:
-                    avg = sum(samples) / len(samples)
-                    self._breath_baseline[did] = avg
+            # Initialize Welford tracker per node
+            if did not in self._presence_welford:
+                from csi_processor import WelfordStats
+                self._presence_welford[did] = {
+                    "stats": WelfordStats(),
+                    "calibrated": False,
+                    "threshold": 0.0,
+                }
+
+            tracker = self._presence_welford[did]
+
+            # Calibration phase: first 60 samples
+            if not tracker["calibrated"]:
+                tracker["stats"].update(score)
+                if tracker["stats"].count >= 60:
+                    tracker["calibrated"] = True
+                    tracker["threshold"] = tracker["stats"].mean + 3.0 * tracker["stats"].std()
+                    dev["_presence_baseline"] = tracker["stats"].mean
+                    dev["_presence_threshold"] = tracker["threshold"]
                 continue
 
-            # Compare against baseline — 30% change = real breathing
-            baseline = self._breath_baseline.get(did, 20.0)
-            if abs(bpm - baseline) > baseline * 0.3:
-                nodes_with_real_breathing += 1
+            # Detection: score above calibrated threshold
+            if score > tracker["threshold"]:
+                nodes_with_presence += 1
+                dev["_presence_z"] = tracker["stats"].z_score(score)
+            else:
+                dev["_presence_z"] = 0.0
 
-        return max(camera, fused, nodes_with_real_breathing)
+            # Slow baseline drift adaptation (0.1% per sample)
+            tracker["stats"].update(score * 0.001 + tracker["stats"].mean * 0.999)
+
+        # Also count nodes with server-extracted breathing in valid range
+        nodes_breathing = 0
+        for dev in self.devices.values():
+            if dev.get("status") != "online":
+                continue
+            csi_br = dev.get("csi_breathing_bpm")
+            csi_hr = dev.get("csi_heart_rate")
+            # Valid breathing AND heart rate = strong presence signal
+            if csi_br and 8 <= csi_br <= 25 and csi_hr and 50 <= csi_hr <= 100:
+                nodes_breathing += 1
+
+        return max(camera, fused, nodes_with_presence, nodes_breathing)
 
     def ensure_device(self, node_id: int, ip: str | None = None) -> dict[str, Any]:
         device_id = self.device_key(node_id)
