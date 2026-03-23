@@ -320,9 +320,20 @@ class SignalAdapterRuntime:
 
         self.zones[0]["lastActivity"] = processed.timestamp
 
-        # Track per-device CSI motion for presence detection
+        # Track per-device CSI metrics
         device["motion_energy"] = processed.motion_index
-        device["presence_score"] = processed.motion_index
+        device["presence_score"] = processed.presence_score
+
+        # Server-side vitals extraction (supplement firmware vitals)
+        if processed.breathing_rate is not None:
+            device["csi_breathing_bpm"] = processed.breathing_rate
+        if processed.heart_rate is not None:
+            device["csi_heart_rate"] = processed.heart_rate
+        # Use server vitals as fallback when firmware vitals unavailable
+        if device.get("breathing_bpm", 0) == 0 and processed.breathing_rate:
+            device["breathing_bpm"] = processed.breathing_rate
+        if device.get("heart_rate", 0) == 0 and processed.heart_rate:
+            device["heart_rate"] = processed.heart_rate
 
         if not self.zones[0].get("_manual_override"):
             self.zones[0]["presenceCount"] = self._recompute_presence_count()
