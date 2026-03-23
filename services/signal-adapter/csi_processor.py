@@ -62,7 +62,7 @@ class WelfordStats:
         self.m2 += delta * delta2
 
     def variance(self) -> float:
-        return self.m2 / self.count if self.count > 1 else 0.0
+        return self.m2 / (self.count - 1) if self.count > 1 else 0.0
 
     def std(self) -> float:
         return math.sqrt(self.variance())

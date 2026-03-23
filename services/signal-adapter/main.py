@@ -299,8 +299,8 @@ class SignalAdapterRuntime:
             else:
                 dev["_presence_z"] = 0.0
 
-            # Slow baseline drift adaptation (0.1% per sample)
-            tracker["stats"].update(score * 0.001 + tracker["stats"].mean * 0.999)
+            # Slow threshold drift (don't corrupt Welford stats)
+            tracker["threshold"] = tracker["threshold"] * 0.999 + score * 0.001
 
         # Also count nodes with server-extracted breathing in valid range
         nodes_breathing = 0
@@ -586,20 +586,23 @@ runtime = SignalAdapterRuntime()
 class UDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
-        self._semaphore = asyncio.Semaphore(8)  # Max 8 concurrent tasks
+        self._active_tasks = 0  # Backpressure counter (asyncio single-thread safe)
 
     def datagram_received(self, data: bytes, addr) -> None:
+        # asyncio is single-threaded so plain counter is safe (no TOCTOU race)
+        if self._active_tasks >= 8:
+            return  # Drop frame under backpressure
+        self._active_tasks += 1
         self.loop.create_task(self._handle(data, addr))
 
     async def _handle(self, data, addr):
-        if self._semaphore.locked():
-            return  # Drop frame under backpressure
-        async with self._semaphore:
-            try:
-                await runtime.route_datagram(data, addr)
-            except Exception as e:
-                import traceback
-                traceback.print_exc()
+        try:
+            await runtime.route_datagram(data, addr)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        finally:
+            self._active_tasks -= 1
 
 
 async def _offline_check_loop():
