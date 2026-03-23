@@ -108,7 +108,8 @@ export default function FloorView() {
   const handlePointerUp = useCallback(() => {
     if (dragging) {
       // Persist new position to signal-adapter
-      const dev = devices.find((d) => d.id === dragging);
+      // Use getState() to avoid stale closure over `devices`
+      const dev = useDeviceStore.getState().devices.find((d) => d.id === dragging);
       if (dev) {
         fetch(`/api/devices/${dev.id}/position`, {
           method: 'PUT',
@@ -118,7 +119,7 @@ export default function FloorView() {
       }
     }
     setDragging(null);
-  }, [dragging, devices]);
+  }, [dragging]);
 
   // CSI heatmap
   const heatmap = useMemo(() => {

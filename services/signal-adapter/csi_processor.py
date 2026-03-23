@@ -42,6 +42,7 @@ class ProcessedCSI:
     hampel_outliers_removed: int = 0
     estimated_persons: int = 0
     per_person_breathing: list[float] | None = None
+    doppler_velocity: float | None = None
 
 
 class WelfordStats:
@@ -60,6 +61,13 @@ class WelfordStats:
         self.mean += delta / self.count
         delta2 = value - self.mean
         self.m2 += delta * delta2
+
+        # Windowed variant: after 10000 frames apply exponential decay
+        # so that recent data is weighted more heavily and variance
+        # remains sensitive instead of becoming frozen.
+        if self.count > 10000:
+            self.m2 *= 0.99
+            self.count = int(self.count * 0.99)
 
     def variance(self) -> float:
         return self.m2 / (self.count - 1) if self.count > 1 else 0.0
@@ -212,6 +220,15 @@ class CSIProcessor:
         if breathing_rate is not None and len(amplitude) > 0:
             fresnel_confidence = self._fresnel_breathing_confidence(amplitude)
 
+        # --- Step 6: Spectrogram (STFT) — Doppler velocity extraction ---
+        # Compute time-frequency decomposition of phase history to extract
+        # dominant Doppler frequency for motion classification.
+        # Ported concept from wifi-densepose-signal/spectrogram.rs
+        doppler_velocity = None
+        if history and len(history) >= self.MIN_FRAMES_VITALS:
+            phase_arr_doppler = np.array(list(history))
+            _spectrogram, doppler_velocity = self._compute_spectrogram(phase_arr_doppler)
+
         # Multi-person separation via subcarrier correlation clustering
         estimated_persons, per_person_breathing = self._estimate_persons(device_id)
 
@@ -231,6 +248,7 @@ class CSIProcessor:
             hampel_outliers_removed=hampel_outliers_removed,
             estimated_persons=estimated_persons,
             per_person_breathing=per_person_breathing,
+            doppler_velocity=doppler_velocity,
         )
 
     # ------------------------------------------------------------------
@@ -456,6 +474,78 @@ class CSIProcessor:
         estimated_persons = len(per_person_breathing) if per_person_breathing else 0
 
         return (estimated_persons, per_person_breathing if per_person_breathing else None)
+
+    def _compute_spectrogram(self, phase_history: np.ndarray) -> tuple[np.ndarray, float | None]:
+        """Compute STFT spectrogram of phase history for Doppler extraction.
+
+        Ported concept from wifi-densepose-signal/spectrogram.rs.
+
+        Uses Short-Time Fourier Transform (STFT) on the phase history buffer
+        to produce a time-frequency matrix. The dominant frequency in the
+        motion band (0.5-5 Hz) is converted to Doppler velocity using the
+        WiFi wavelength at 5.8 GHz.
+
+        Args:
+            phase_history: 1-D array of unwrapped phase values (up to 256 samples
+                           at SAMPLE_RATE Hz).
+
+        Returns:
+            (spectrogram, doppler_velocity) where spectrogram is a 2-D array
+            of shape (n_freqs, n_time_bins) and doppler_velocity is the estimated
+            radial velocity in m/s (None if no dominant motion frequency found).
+        """
+        n = len(phase_history)
+        if n < 32:
+            return np.empty((0, 0)), None
+
+        # STFT parameters — 64-sample window (~3.2s at 20 Hz), 75% overlap
+        nperseg = min(64, n)
+        noverlap = nperseg * 3 // 4
+
+        try:
+            freqs, times, zxx = scipy_signal.stft(
+                phase_history,
+                fs=self.SAMPLE_RATE,
+                window="hann",
+                nperseg=nperseg,
+                noverlap=noverlap,
+            )
+        except Exception:
+            return np.empty((0, 0)), None
+
+        # Magnitude spectrogram (freqs x time_bins)
+        spectrogram = np.abs(zxx)
+
+        # Extract dominant Doppler frequency in motion band (0.5-5 Hz)
+        # Below 0.5 Hz is breathing/static; above 5 Hz is noise at 20 Hz Nyquist
+        motion_lo = 0.5
+        motion_hi = min(5.0, self.SAMPLE_RATE / 2.0 - 0.1)
+        motion_mask = (freqs >= motion_lo) & (freqs <= motion_hi)
+
+        if not np.any(motion_mask):
+            return spectrogram, None
+
+        # Average power across all time bins for each frequency
+        avg_power = np.mean(spectrogram[motion_mask, :], axis=1)
+        motion_freqs = freqs[motion_mask]
+
+        peak_idx = int(np.argmax(avg_power))
+        peak_power = avg_power[peak_idx]
+        mean_power = float(np.mean(avg_power))
+
+        # Reject weak peaks (SNR check)
+        if mean_power > 0 and peak_power < mean_power * 2.0:
+            return spectrogram, None
+
+        dominant_freq = float(motion_freqs[peak_idx])
+
+        # Convert Doppler frequency to velocity:
+        #   v = f_doppler * wavelength / 2
+        # Factor of 2 accounts for round-trip (TX -> body -> RX reflection)
+        wavelength = self.SPEED_OF_LIGHT / self.DEFAULT_FREQUENCY  # ~0.0517 m at 5.8 GHz
+        doppler_velocity = dominant_freq * wavelength / 2.0
+
+        return spectrogram, round(doppler_velocity, 4)
 
     def _unwrap_phase(self, device_id: str, phase_raw: np.ndarray) -> np.ndarray:
         """Phase unwrapping — remove 2π discontinuities.

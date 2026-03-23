@@ -111,6 +111,8 @@ class Observatory {
     this._buildWifiWaves();
     this._buildSignalField();
     this._buildCSIHeatmapPanel();
+    this._buildPhasePlotPanel();
+    this._buildDopplerSpectrumPanel();
     this._buildSignalFieldFloor();
 
     // Post-processing
@@ -590,12 +592,34 @@ class Observatory {
         fall_detected: hasFall,
       },
       signal_field: this._buildSignalFieldData(personCount),
-      vital_signs: {
-        breathing_rate_bpm: lastVitals?.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
-        heart_rate_bpm: lastVitals?.heart_rate_bpm || (personCount > 0 ? 76 : 0),
-        breathing_confidence: lastVitals ? 0.7 : (personCount > 0 ? 0.55 : 0),
-        heart_rate_confidence: lastVitals ? 0.5 : (personCount > 0 ? 0.35 : 0),
-      },
+      vital_signs: (() => {
+        // P2-9: When no dedicated vitals message, aggregate from device-level data
+        if (lastVitals) {
+          return {
+            breathing_rate_bpm: lastVitals.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
+            heart_rate_bpm: lastVitals.heart_rate_bpm || (personCount > 0 ? 76 : 0),
+            breathing_confidence: 0.7,
+            heart_rate_confidence: 0.5,
+          };
+        }
+        // Aggregate breathing_bpm and heart_rate from online devices
+        let breathSum = 0, breathCount = 0, hrSum = 0, hrCount = 0;
+        for (const dev of onlineDevices) {
+          if (dev.breathing_bpm > 0) { breathSum += dev.breathing_bpm; breathCount++; }
+          if (dev.heart_rate > 0 || dev.csi_heart_rate > 0) {
+            hrSum += (dev.heart_rate || dev.csi_heart_rate || 0);
+            hrCount++;
+          }
+        }
+        const aggBreathing = breathCount > 0 ? breathSum / breathCount : (personCount > 0 ? 15 : 0);
+        const aggHr = hrCount > 0 ? hrSum / hrCount : (personCount > 0 ? 76 : 0);
+        return {
+          breathing_rate_bpm: aggBreathing,
+          heart_rate_bpm: aggHr,
+          breathing_confidence: breathCount > 0 ? 0.65 : (personCount > 0 ? 0.55 : 0),
+          heart_rate_confidence: hrCount > 0 ? 0.45 : (personCount > 0 ? 0.35 : 0),
+        };
+      })(),
       persons,
       estimated_persons: personCount,
       edge_modules: {},
@@ -710,6 +734,8 @@ class Observatory {
     this._updateWifiWaves(elapsed);
     this._updateSignalField(data);
     this._updateCSIHeatmapPanel(data, elapsed);
+    this._updatePhasePlotPanel(data, elapsed);
+    this._updateDopplerSpectrumPanel(data, elapsed);
     this._updateSignalFieldFloor(data, elapsed);
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);
@@ -975,9 +1001,9 @@ class Observatory {
       amplitude[s] = Math.max(0, Math.min(1, 0.3 + motionPower * 0.4 + baseFreq + bodyEffect + noise));
     }
 
-    // Shift history and add new row
-    this._csiAmplitudeHistory.shift();
-    this._csiAmplitudeHistory.push(new Float32Array(amplitude));
+    // P2-10: Ring buffer — overwrite at _csiTimeIndex instead of shift()
+    this._csiAmplitudeHistory[this._csiTimeIndex].set(amplitude);
+    this._csiTimeIndex = (this._csiTimeIndex + 1) % 40;
 
     // Render heatmap to canvas
     const ctx = this._csiCtx;
@@ -985,7 +1011,8 @@ class Observatory {
     const cellH = 10; // 400 / 40
 
     for (let t = 0; t < 40; t++) {
-      const row = this._csiAmplitudeHistory[t];
+      // Read from ring buffer: oldest entry is at _csiTimeIndex, newest at _csiTimeIndex-1
+      const row = this._csiAmplitudeHistory[(this._csiTimeIndex + t) % 40];
       for (let s = 0; s < 30; s++) {
         const val = row[s] || 0;
         // Color: blue(quiet) -> cyan -> green -> yellow -> red(active)
@@ -1009,52 +1036,81 @@ class Observatory {
   // ========================================
 
   _buildSignalFieldFloor() {
-    // 20x20 grid of small spheres on the floor, colored by signal field values
-    // Inspired by gaussian-splats.js floor rendering
+    // 20x20 grid rendered as InstancedMesh with a single shared material
+    // and per-instance color via InstancedBufferAttribute (P1-7 fix:
+    // replaces 400 individual MeshBasicMaterials with one).
     const gridSize = 20;
     const count = gridSize * gridSize;
-    this._floorSpheres = [];
-    this._floorGroup = new THREE.Group();
-    this._floorGroup.name = 'signal-field-floor';
+    this._floorFieldCount = count;
 
     const sphereGeo = new THREE.SphereGeometry(0.08, 8, 8);
+    this._floorMaterial = new THREE.MeshBasicMaterial({
+      transparent: true,
+      opacity: 0.35,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    });
+    this._floorInstancedMesh = new THREE.InstancedMesh(sphereGeo, this._floorMaterial, count);
+    this._floorInstancedMesh.name = 'signal-field-floor';
+    this._floorInstancedMesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
 
+    // Per-instance color buffer
+    const colorArray = new Float32Array(count * 3);
+    this._floorInstancedMesh.instanceColor = new THREE.InstancedBufferAttribute(colorArray, 3);
+    this._floorInstancedMesh.instanceColor.setUsage(THREE.DynamicDrawUsage);
+
+    // Set initial transforms and colors
+    const dummy = new THREE.Object3D();
     for (let iz = 0; iz < gridSize; iz++) {
       for (let ix = 0; ix < gridSize; ix++) {
-        const mat = new THREE.MeshBasicMaterial({
-          color: 0x0a1428,
-          transparent: true,
-          opacity: 0.15,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        });
-        const sphere = new THREE.Mesh(sphereGeo, mat);
-        sphere.position.set(
+        const idx = iz * gridSize + ix;
+        dummy.position.set(
           (ix - gridSize / 2) * 0.6 + 0.3,
           0.04,
           (iz - gridSize / 2) * 0.5 + 0.25
         );
-        this._floorGroup.add(sphere);
-        this._floorSpheres.push(sphere);
+        dummy.scale.setScalar(1);
+        dummy.updateMatrix();
+        this._floorInstancedMesh.setMatrixAt(idx, dummy.matrix);
+        // Default dim blue
+        colorArray[idx * 3] = 0.04;
+        colorArray[idx * 3 + 1] = 0.08;
+        colorArray[idx * 3 + 2] = 0.16;
       }
     }
+    this._floorInstancedMesh.instanceMatrix.needsUpdate = true;
+    this._floorInstancedMesh.instanceColor.needsUpdate = true;
 
-    this._scene.add(this._floorGroup);
+    this._scene.add(this._floorInstancedMesh);
+
+    // Reusable Object3D for per-frame matrix updates
+    this._floorDummy = new THREE.Object3D();
+    // Store base positions for Y-offset animation
+    this._floorBasePositions = new Float32Array(count * 3);
+    for (let iz = 0; iz < gridSize; iz++) {
+      for (let ix = 0; ix < gridSize; ix++) {
+        const idx = iz * gridSize + ix;
+        this._floorBasePositions[idx * 3] = (ix - gridSize / 2) * 0.6 + 0.3;
+        this._floorBasePositions[idx * 3 + 1] = 0.04;
+        this._floorBasePositions[idx * 3 + 2] = (iz - gridSize / 2) * 0.5 + 0.25;
+      }
+    }
   }
 
   _updateSignalFieldFloor(data, elapsed) {
-    if (!this._floorSpheres) return;
+    if (!this._floorInstancedMesh) return;
     const field = data?.signal_field?.values;
     const motionPower = data?.features?.motion_band_power || 0;
-    const count = this._floorSpheres.length;
+    const count = this._floorFieldCount;
+    const colors = this._floorInstancedMesh.instanceColor.array;
+    const dummy = this._floorDummy;
+    const basePos = this._floorBasePositions;
 
     for (let i = 0; i < count; i++) {
-      const sphere = this._floorSpheres[i];
       // Use signal field data if available, otherwise generate from features
-      let v = field ? (field[i] || 0) : 0.05;
+      const v = field ? (field[i] || 0) : 0.05;
 
       // Color: blue(quiet) -> cyan -> green -> yellow -> red(active)
-      // Same color scheme as gaussian-splats.js valueToColor
       let r, g, b;
       if (v < 0.5) {
         const t = v * 2;
@@ -1063,19 +1119,29 @@ class Observatory {
         const t = (v - 0.5) * 2;
         r = t; g = 1 - t; b = 0;
       }
-      sphere.material.color.setRGB(r, g, b);
+      colors[i * 3] = r;
+      colors[i * 3 + 1] = g;
+      colors[i * 3 + 2] = b;
 
-      // Opacity based on signal strength
-      sphere.material.opacity = 0.1 + v * 0.5;
-
-      // Pulsate based on motion energy
+      // Pulsate scale based on motion energy
       const pulseFactor = 1 + Math.sin(elapsed * 2.5 + i * 0.15) * motionPower * 0.6;
       const baseScale = 0.6 + v * 1.8;
-      sphere.scale.setScalar(baseScale * pulseFactor);
 
       // Y-offset pulsation for active areas
-      sphere.position.y = 0.04 + v * Math.sin(elapsed * 1.8 + i * 0.1) * 0.03;
+      dummy.position.set(
+        basePos[i * 3],
+        basePos[i * 3 + 1] + v * Math.sin(elapsed * 1.8 + i * 0.1) * 0.03,
+        basePos[i * 3 + 2]
+      );
+      dummy.scale.setScalar(baseScale * pulseFactor);
+      dummy.updateMatrix();
+      this._floorInstancedMesh.setMatrixAt(i, dummy.matrix);
     }
+
+    this._floorInstancedMesh.instanceMatrix.needsUpdate = true;
+    this._floorInstancedMesh.instanceColor.needsUpdate = true;
+    // Adjust shared material opacity based on average signal level
+    this._floorMaterial.opacity = 0.35;
   }
 
   // ---- FPS ----

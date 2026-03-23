@@ -6,10 +6,10 @@ import EventsPage from './pages/EventsPage';
 import SettingsPage from './pages/SettingsPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import { useDeviceStore } from '@/stores/deviceStore';
-import { useZoneStore } from '@/stores/zoneStore';
-import { useEventStore } from '@/stores/eventStore';
-import { useSignalStore } from '@/stores/signalStore';
+import { useDeviceStore, type Device } from '@/stores/deviceStore';
+import { useZoneStore, type Zone } from '@/stores/zoneStore';
+import { useEventStore, type DetectionEvent } from '@/stores/eventStore';
+import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
 
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
@@ -34,20 +34,20 @@ function DataProvider({ children }: { children: React.ReactNode }) {
       if (!msg || !msg.type) return;
       switch (msg.type) {
         case 'init':
-          if (msg.payload.devices) setDevices(msg.payload.devices as never[]);
-          if (msg.payload.zones) setZones(msg.payload.zones as never[]);
+          if (msg.payload.devices) setDevices(msg.payload.devices as Device[]);
+          if (msg.payload.zones) setZones(msg.payload.zones as Zone[]);
           break;
         case 'event':
-          addEvent(msg.payload as never);
+          addEvent(msg.payload as DetectionEvent);
           break;
         case 'signal':
-          addSignalPoint(msg.payload as never);
+          addSignalPoint(msg.payload as SignalPoint);
           break;
         case 'device_update':
-          if (msg.payload.devices) setDevices(msg.payload.devices as never[]);
+          if (msg.payload.devices) setDevices(msg.payload.devices as Device[]);
           break;
         case 'zone_update':
-          if (msg.payload.zones) setZones(msg.payload.zones as never[]);
+          if (msg.payload.zones) setZones(msg.payload.zones as Zone[]);
           break;
         case 'vitals':
           // vitals payload does not match SignalPoint schema; observatory consumes it via its own WS
