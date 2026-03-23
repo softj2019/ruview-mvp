@@ -76,7 +76,7 @@ class CSIProcessor:
 
     def __init__(self):
         # Per-device state
-        self._amplitude_buffer: dict[str, list[list[float]]] = {}
+        self._amplitude_buffer: dict[str, deque] = {}
         self._phase_history: dict[str, deque] = {}  # deque of phase arrays
         self._prev_phase: dict[str, np.ndarray | None] = {}
         self._subcarrier_var: dict[str, list[WelfordStats]] = {}
@@ -103,7 +103,7 @@ class CSIProcessor:
             self._frame_count[device_id] = 0
             self._phase_history[device_id] = deque(maxlen=self.BUFFER_SIZE)
             self._prev_phase[device_id] = None
-            self._amplitude_buffer[device_id] = []
+            self._amplitude_buffer[device_id] = deque(maxlen=50)
 
         self._frame_count[device_id] += 1
 
@@ -121,8 +121,6 @@ class CSIProcessor:
 
         # Amplitude buffer for motion detection
         self._amplitude_buffer[device_id].append(amplitude)
-        if len(self._amplitude_buffer[device_id]) > 50:
-            self._amplitude_buffer[device_id].pop(0)
 
         # Update per-subcarrier variance tracking
         n_sc = len(amplitude)

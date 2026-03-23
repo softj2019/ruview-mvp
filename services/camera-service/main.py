@@ -52,6 +52,7 @@ calibrator = Calibrator()
 _detect_frame_count = 0
 _detect_thread: threading.Thread | None = None
 _detect_running = False
+_ws_lock = threading.Lock()  # Protects _ws_clients
 
 # Connected detection WS clients
 _ws_clients: list[WebSocket] = []
@@ -124,17 +125,19 @@ def _send_to_adapter(payload: dict):
 
 def _broadcast_detections(payload: dict):
     """Broadcast detections to connected WebSocket clients."""
-    if not _ws_clients:
-        return
-    msg = json.dumps(payload)
-    dead = []
-    for ws in _ws_clients:
-        try:
-            asyncio.run_coroutine_threadsafe(ws.send_text(msg), _loop)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _ws_clients.remove(ws)
+    with _ws_lock:
+        if not _ws_clients:
+            return
+        msg = json.dumps(payload)
+        dead = []
+        for ws in list(_ws_clients):
+            try:
+                asyncio.run_coroutine_threadsafe(ws.send_text(msg), _loop)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            if ws in _ws_clients:
+                _ws_clients.remove(ws)
 
 
 _loop: asyncio.AbstractEventLoop | None = None
@@ -270,15 +273,17 @@ async def snapshot_raw():
 @app.websocket("/cam/detections")
 async def ws_detections(websocket: WebSocket):
     await websocket.accept()
-    _ws_clients.append(websocket)
+    with _ws_lock:
+        _ws_clients.append(websocket)
     try:
         while True:
             await websocket.receive_text()
     except WebSocketDisconnect:
         pass
     finally:
-        if websocket in _ws_clients:
-            _ws_clients.remove(websocket)
+        with _ws_lock:
+            if websocket in _ws_clients:
+                _ws_clients.remove(websocket)
 
 
 # ---- Zoom Endpoints ----

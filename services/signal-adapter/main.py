@@ -13,12 +13,12 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from .ws_manager import ConnectionManager
-    from .csi_processor import CSIProcessor, ProcessedCSI
+    from .csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
     from .event_engine import EventEngine
     from .supabase_client import get_supabase
 except ImportError:
     from ws_manager import ConnectionManager
-    from csi_processor import CSIProcessor, ProcessedCSI
+    from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
     from event_engine import EventEngine
     from supabase_client import get_supabase
 
@@ -142,6 +142,14 @@ class SignalAdapterRuntime:
         self.devices: dict[str, dict[str, Any]] = {}
         self.zones: list[dict[str, Any]] = [dict(z) for z in DEFAULT_ZONES]
         self.transport = None
+        # Broadcast throttling: max once per 200ms
+        self._last_broadcast_time = 0.0
+        self._broadcast_interval = 0.2  # seconds
+        # Lazy-init state (P3-13 fix)
+        self._presence_welford: dict = {}
+        self._motion_baseline: dict = {}
+        self._motion_baseline_samples: dict = {}
+        self._baseline_ready = False
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -264,7 +272,6 @@ class SignalAdapterRuntime:
 
             # Initialize Welford tracker per node
             if did not in self._presence_welford:
-                from csi_processor import WelfordStats
                 self._presence_welford[did] = {
                     "stats": WelfordStats(),
                     "calibrated": False,
@@ -488,8 +495,13 @@ class SignalAdapterRuntime:
         # Recompute presence for all zones
         self._recompute_presence_count()
 
-        await self.broadcast_devices()
-        await self.broadcast_zones()
+        # Throttled broadcast: max once per 200ms to prevent event loop saturation
+        import time as _time
+        now = _time.monotonic()
+        if now - self._last_broadcast_time >= self._broadcast_interval:
+            self._last_broadcast_time = now
+            await self.broadcast_devices()
+            await self.broadcast_zones()
         await self.handle_processed(processed)
 
     async def handle_vitals_frame(self, data: bytes, addr: tuple[str, int]) -> None:
@@ -572,9 +584,16 @@ runtime = SignalAdapterRuntime()
 class UDPProtocol(asyncio.DatagramProtocol):
     def __init__(self, loop: asyncio.AbstractEventLoop) -> None:
         self.loop = loop
+        self._semaphore = asyncio.Semaphore(8)  # Max 8 concurrent tasks
 
     def datagram_received(self, data: bytes, addr) -> None:
-        self.loop.create_task(runtime.route_datagram(data, addr))
+        self.loop.create_task(self._handle(data, addr))
+
+    async def _handle(self, data, addr):
+        if self._semaphore.locked():
+            return  # Drop frame under backpressure
+        async with self._semaphore:
+            await runtime.route_datagram(data, addr)
 
 
 async def _offline_check_loop():
