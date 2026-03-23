@@ -5,6 +5,8 @@ export interface SignalPoint {
   rssi: number;
   snr: number;
   csi_amplitude: number;
+  breathing_rate?: number;
+  heart_rate?: number;
 }
 
 interface SignalState {
