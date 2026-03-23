@@ -249,14 +249,17 @@ class SignalAdapterRuntime:
             # Slow threshold drift (don't corrupt Welford stats)
             tracker["threshold"] = tracker["threshold"] * 0.999 + score * 0.001
 
-        # Also count nodes with server-extracted breathing in valid range
+        # Count nodes with valid breathing ONLY if Welford also confirms presence
+        # (prevents false positives from WiFi noise in empty rooms)
         nodes_breathing = 0
         for dev in self.devices.values():
             if dev.get("status") != "online":
                 continue
+            # Require Welford z-score > 0 (presence confirmed by variance change)
+            if dev.get("_presence_z", 0) <= 0:
+                continue
             csi_br = dev.get("csi_breathing_bpm")
             csi_hr = dev.get("csi_heart_rate")
-            # Valid breathing AND heart rate = strong presence signal
             if csi_br and 8 <= csi_br <= 25 and csi_hr and 50 <= csi_hr <= 100:
                 nodes_breathing += 1
 
