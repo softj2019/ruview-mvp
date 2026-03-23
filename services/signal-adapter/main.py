@@ -593,7 +593,11 @@ class UDPProtocol(asyncio.DatagramProtocol):
         if self._semaphore.locked():
             return  # Drop frame under backpressure
         async with self._semaphore:
-            await runtime.route_datagram(data, addr)
+            try:
+                await runtime.route_datagram(data, addr)
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
 
 
 async def _offline_check_loop():

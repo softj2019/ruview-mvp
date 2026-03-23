@@ -114,6 +114,15 @@ class CSIProcessor:
         )
 
     def process(self, raw: dict[str, Any]) -> ProcessedCSI:
+        """Process raw CSI frame through the full signal pipeline.
+
+        Pipeline order:
+          1. CSI Ratio (conjugate multiplication) — phase offset cancellation
+          2. Hampel filter — robust MAD-based outlier removal on amplitude
+          3. Phase unwrapping — remove 2pi discontinuities
+          4. Variance tracking / top-K selection / vitals extraction
+          5. Fresnel zone model — physics-based confidence weighting
+        """
         device_id = raw.get("device_id", "unknown")
         timestamp = raw.get("timestamp", "")
         csi_data = raw.get("csi_data", [])
@@ -127,13 +136,28 @@ class CSIProcessor:
 
         self._frame_count[device_id] += 1
 
+        hampel_outliers_removed = 0
+
         # Extract amplitude and phase from complex CSI
         if isinstance(csi_data, list) and len(csi_data) > 0:
             csi_array = np.array(csi_data, dtype=np.complex64)
+
+            # --- Step 1: CSI Ratio — phase offset cancellation ---
+            # Apply conjugate multiplication against reference subcarrier
+            # to cancel common hardware phase offsets (CFO, SFO, PDD).
+            # Ported from wifi-densepose-signal/csi_ratio.rs
+            csi_array = self._apply_csi_ratio(csi_array)
+
             amplitude = np.abs(csi_array).tolist()
             phase_raw = np.angle(csi_array)
 
-            # Phase unwrapping (remove 2π discontinuities)
+            # --- Step 2: Hampel filter — outlier removal on amplitude ---
+            # Replace z-score outlier detection with MAD-based Hampel filter.
+            # More robust: resists up to 50% contamination unlike z-score.
+            # Ported from wifi-densepose-signal/hampel.rs
+            amplitude, hampel_outliers_removed = self._hampel_filter(amplitude)
+
+            # --- Step 3: Phase unwrapping (remove 2pi discontinuities) ---
             phase = self._unwrap_phase(device_id, phase_raw)
         else:
             amplitude = []
@@ -142,6 +166,7 @@ class CSIProcessor:
         # Amplitude buffer for motion detection
         self._amplitude_buffer[device_id].append(amplitude)
 
+        # --- Step 4: Existing variance/vitals extraction ---
         # Update per-subcarrier variance tracking
         n_sc = len(amplitude)
         self._update_subcarrier_variance(device_id, amplitude, n_sc)
@@ -180,6 +205,13 @@ class CSIProcessor:
             breathing_rate = self._extract_breathing(phase_arr)
             heart_rate = self._extract_heart_rate(phase_arr)
 
+        # --- Step 5: Fresnel zone confidence weighting ---
+        # Validate breathing detection against physics-based Fresnel model.
+        # Ported from wifi-densepose-signal/fresnel.rs
+        fresnel_confidence = 0.0
+        if breathing_rate is not None and len(amplitude) > 0:
+            fresnel_confidence = self._fresnel_breathing_confidence(amplitude)
+
         # Multi-person separation via subcarrier correlation clustering
         estimated_persons, per_person_breathing = self._estimate_persons(device_id)
 
@@ -195,9 +227,158 @@ class CSIProcessor:
             heart_rate=heart_rate,
             presence_score=presence_score,
             top_k_variance=top_k_var,
+            fresnel_confidence=fresnel_confidence,
+            hampel_outliers_removed=hampel_outliers_removed,
             estimated_persons=estimated_persons,
             per_person_breathing=per_person_breathing,
         )
+
+    # ------------------------------------------------------------------
+    # SOTA algorithms ported from ruvnet/RuView Rust crates
+    # ------------------------------------------------------------------
+
+    def _apply_csi_ratio(self, csi_array: np.ndarray) -> np.ndarray:
+        """CSI Ratio via conjugate multiplication — cancel phase offsets.
+
+        Ported from wifi-densepose-signal/csi_ratio.rs::conjugate_multiply().
+
+        Computes ratio[i] = CSI[i] * conj(CSI[ref]) for each subcarrier,
+        where ref is the subcarrier with the lowest amplitude variance
+        (most stable). This cancels common-mode phase offsets from WiFi
+        hardware (CFO, SFO, packet detection delay), preserving only
+        environment-induced phase changes.
+
+        For single-antenna ESP32 data, this acts as inter-subcarrier
+        ratio rather than inter-antenna ratio.
+        """
+        if csi_array.ndim != 1 or len(csi_array) < 2:
+            return csi_array
+
+        # Select reference subcarrier: lowest amplitude variance across
+        # recent frames would be ideal, but for a single frame we use
+        # the subcarrier with amplitude closest to the median (most stable).
+        amplitudes = np.abs(csi_array)
+        median_amp = np.median(amplitudes)
+        ref_idx = int(np.argmin(np.abs(amplitudes - median_amp)))
+
+        # Conjugate multiply: ratio[i] = CSI[i] * conj(CSI[ref])
+        ref_conj = np.conj(csi_array[ref_idx])
+        ratio = csi_array * ref_conj
+
+        # Normalize by |CSI[ref]|^2 to preserve amplitude scale
+        ref_power = np.abs(csi_array[ref_idx]) ** 2
+        if ref_power > 1e-15:
+            ratio = ratio / ref_power
+
+        return ratio
+
+    def _hampel_filter(self, amplitude: list[float]) -> tuple[list[float], int]:
+        """Hampel filter — MAD-based outlier detection and replacement.
+
+        Ported from wifi-densepose-signal/hampel.rs::hampel_filter().
+
+        For each sample, computes the median and MAD (Median Absolute
+        Deviation) of the surrounding window. If the sample deviates from
+        the median by more than threshold * sigma_est, it is replaced with
+        the median. More robust than z-score: resists up to 50% contamination.
+
+        Returns (filtered_amplitude, num_outliers_removed).
+        """
+        n = len(amplitude)
+        if n == 0:
+            return amplitude, 0
+
+        signal = np.array(amplitude, dtype=np.float64)
+        filtered = signal.copy()
+        outlier_count = 0
+        half_w = self.HAMPEL_HALF_WINDOW
+        threshold = self.HAMPEL_THRESHOLD
+
+        for i in range(n):
+            start = max(0, i - half_w)
+            end = min(n, i + half_w + 1)
+            window = signal[start:end]
+
+            med = float(np.median(window))
+            # MAD = median(|x_i - median|)
+            mad = float(np.median(np.abs(window - med)))
+            # Convert MAD to estimated sigma (for Gaussian: sigma = 1.4826 * MAD)
+            sigma = self.MAD_SCALE * mad
+
+            deviation = abs(signal[i] - med)
+
+            if sigma > 1e-15:
+                # Normal case: compare deviation to threshold * sigma
+                is_outlier = deviation > threshold * sigma
+            else:
+                # Zero-MAD: all window values identical except possibly this one.
+                # Any non-zero deviation is an outlier.
+                is_outlier = deviation > 1e-15
+
+            if is_outlier:
+                filtered[i] = med
+                outlier_count += 1
+
+        return filtered.tolist(), outlier_count
+
+    def _fresnel_breathing_confidence(self, amplitude: list[float]) -> float:
+        """Fresnel zone breathing confidence — physics-based validation.
+
+        Ported from wifi-densepose-signal/fresnel.rs::FresnelBreathingEstimator.
+
+        Models the TX-RX Fresnel zone geometry to predict expected amplitude
+        variation from chest displacement during breathing. Compares observed
+        amplitude variation against the Fresnel model prediction to produce
+        a confidence score (0.0-1.0).
+
+        Breathing causes chest displacement of ~3-15mm, producing phase shift
+        proportional to 2*pi*2*displacement/wavelength. At 5.8 GHz (lambda=52mm),
+        this is a significant fraction of a wavelength.
+        """
+        if len(amplitude) < 2:
+            return 0.0
+
+        # Compute wavelength
+        wavelength = self.SPEED_OF_LIGHT / self.DEFAULT_FREQUENCY
+
+        # Expected amplitude variation for min/max breathing displacement
+        # Phase change: delta_phi = 2*pi * 2*displacement / wavelength
+        # Amplitude variation: |sin(delta_phi / 2)|
+        def expected_amp_var(displacement_m: float) -> float:
+            delta_phi = 2.0 * math.pi * 2.0 * displacement_m / wavelength
+            return abs(math.sin(delta_phi / 2.0))
+
+        min_expected = expected_amp_var(self.FRESNEL_MIN_DISPLACEMENT)
+        max_expected = expected_amp_var(self.FRESNEL_MAX_DISPLACEMENT)
+
+        # Ensure low <= high
+        low, high = (min_expected, max_expected) if min_expected < max_expected else (max_expected, min_expected)
+
+        # Observed amplitude variation (peak-to-peak, normalized)
+        amp_arr = np.array(amplitude, dtype=np.float64)
+        # Remove DC and compute peak-to-peak
+        amp_centered = amp_arr - np.mean(amp_arr)
+        observed = float(np.max(amp_centered) - np.min(amp_centered))
+
+        # Normalize by mean amplitude to get relative variation
+        mean_amp = float(np.mean(amp_arr))
+        if mean_amp > 1e-15:
+            observed = observed / mean_amp
+
+        # Compute confidence based on match with Fresnel prediction
+        if low <= observed <= high:
+            # Within expected breathing range: high confidence
+            confidence = 1.0
+        elif observed < low:
+            # Below range: linearly scale
+            confidence = (observed / low) if low > 1e-15 else 0.0
+            confidence = max(0.0, min(1.0, confidence))
+        else:
+            # Above range: could be larger motion, lower breathing confidence
+            confidence = (high / observed) if observed > 1e-15 else 0.0
+            confidence = max(0.0, min(1.0, confidence))
+
+        return confidence
 
     def _estimate_persons(self, device_id: str) -> tuple[int, list[float] | None]:
         """Estimate person count via subcarrier correlation clustering.
@@ -321,10 +502,10 @@ class CSIProcessor:
         return [stats[i].variance() for i in indices if i < len(stats)]
 
     def _calc_motion_index(self, device_id: str) -> float:
-        buf = self._amplitude_buffer.get(device_id, [])
-        if len(buf) < 5:
+        buf = self._amplitude_buffer.get(device_id)
+        if buf is None or len(buf) < 5:
             return 0.0
-        recent = buf[-10:]
+        recent = list(buf)[-10:]
         min_len = min(len(a) for a in recent)
         if min_len == 0:
             return 0.0
