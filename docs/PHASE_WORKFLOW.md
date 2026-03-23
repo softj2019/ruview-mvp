@@ -70,30 +70,25 @@
 > 참조: `ruvnet-RuView/firmware/esp32-csi-node/main/edge_processing.c`
 > 참조: `ruvnet-RuView/examples/ruview_live.py`
 
-### 1-1. 서버 측 호흡/심박 추출 (csi_processor.py 개선)
+### 1-1. 서버 측 호흡/심박 추출 (csi_processor.py 개선) ✅ 완료
 
-**현재**: amplitude variance만 계산, breathing/heart_rate = None
-**목표**: 실측 BPM 반환
+- [x] **위상 추출**: CSI I/Q → `atan2(Q, I)` per-subcarrier phase
+- [x] **위상 언래핑**: 2π 불연속 제거
+- [x] **Welford 온라인 통계**: per-subcarrier variance tracking
+- [x] **Top-K 서브캐리어 선택**: 8개 최고 variance 서브캐리어
+- [x] **Butterworth IIR 밴드패스**: 호흡 0.1-0.5Hz, 심박 0.8-2.0Hz
+- [x] **Zero-crossing BPM 추정**
+- [x] **FFT 스펙트럼 분석**: `scipy.signal.welch()`
+- [x] 결과 검수: 호흡 10-25 BPM, 심박 56-90 BPM 실측
 
-- [ ] **위상 추출**: CSI I/Q → `atan2(Q, I)` per-subcarrier phase
-  - 참조: `edge_processing.c:126-130`
-- [ ] **위상 언래핑**: 2π 불연속 제거
-  - 참조: `edge_processing.c:134-140`
-  - `if diff > π: diff -= 2π`
-- [ ] **Welford 온라인 통계**: per-subcarrier variance tracking
-  - 참조: `edge_processing.c:146-165`
-  - mean, variance, z-score 실시간 갱신
-- [ ] **Top-K 서브캐리어 선택**: 8개 최고 variance 서브캐리어
-- [ ] **Butterworth IIR 밴드패스**:
-  - 호흡: `scipy.signal.butter(2, [0.1, 0.5], btype='band', fs=20)`
-  - 심박: `scipy.signal.butter(2, [0.8, 2.0], btype='band', fs=20)`
-- [ ] **Zero-crossing BPM 추정**:
-  - 참조: `edge_processing.c:179-206`
-  - 양의 제로크로싱 카운트 → `BPM = (fs / avg_period) * 60`
-- [ ] **FFT 스펙트럼 분석**: `scipy.signal.welch()` 추가
-  - 호흡 피크: 0.2-0.33 Hz (12-20 BPM)
-  - 심박 피크: 1.0-1.5 Hz (60-90 BPM)
-- [ ] 결과 검증: 알려진 호흡 패턴(8, 15, 25 BPM)과 비교
+### 1-1b. SOTA 신호처리 알고리즘 (ruvnet 참조) — 진행 중
+
+- [ ] **Hampel 필터**: 슬라이딩 윈도우 MAD 아웃라이어 제거 — `hampel.rs`
+- [ ] **CSI Ratio**: 켤레 곱셈으로 위상 오프셋 제거 — `csi_ratio.rs` (SpotFi 2015)
+- [ ] **Fresnel Zone 모델**: TX-RX 기하학 기반 호흡 신뢰도 — `fresnel.rs` (FarSense 2019)
+- [ ] **CSI Spectrogram**: STFT 시간-주파수 분석 — `spectrogram.rs`
+- [ ] **BVP (Body Velocity Profile)**: 신체 속도 프로파일 — `bvp.rs` (Widar 3.0)
+- [ ] **서브캐리어 감도 선택**: variance ratio 기반 — `subcarrier_selection.rs`
 
 ### 1-2. 적응형 재실 감지 개선
 

@@ -10,6 +10,11 @@ Algorithms ported from ruvnet/RuView:
   - Bandpass filtering (scipy Butterworth, equiv to Biquad IIR)
   - Zero-crossing BPM estimation (edge_processing.c:179-206)
   - FFT spectral peak detection (ruview_live.py)
+
+SOTA signal processing (ported from ruvnet/RuView Rust crates):
+  - Hampel filter (wifi-densepose-signal/hampel.rs) — MAD-based outlier removal
+  - CSI Ratio / conjugate multiplication (wifi-densepose-signal/csi_ratio.rs) — phase offset cancellation
+  - Fresnel zone breathing model (wifi-densepose-signal/fresnel.rs) — physics-based confidence weighting
 """
 import math
 from collections import deque
@@ -33,6 +38,8 @@ class ProcessedCSI:
     heart_rate: float | None
     presence_score: float
     top_k_variance: list[float]
+    fresnel_confidence: float = 0.0
+    hampel_outliers_removed: int = 0
     estimated_persons: int = 0
     per_person_breathing: list[float] | None = None
 
@@ -73,6 +80,19 @@ class CSIProcessor:
     SAMPLE_RATE = 20.0      # Approximate CSI frame rate (Hz)
     MIN_FRAMES_VITALS = 64  # Minimum frames before BPM estimation
     CORR_THRESHOLD = 0.7    # Correlation threshold for same-person clustering
+
+    # Hampel filter config (ported from wifi-densepose-signal/hampel.rs)
+    HAMPEL_HALF_WINDOW = 3  # Half-window size (total = 2*3+1 = 7 samples)
+    HAMPEL_THRESHOLD = 3.0  # Outlier threshold in units of estimated sigma
+    MAD_SCALE = 1.4826      # MAD-to-sigma scale for Gaussian: sigma = 1.4826 * MAD
+
+    # Fresnel zone model config (ported from wifi-densepose-signal/fresnel.rs)
+    SPEED_OF_LIGHT = 2.998e8            # m/s
+    DEFAULT_FREQUENCY = 5.8e9           # 5.8 GHz WiFi (Hz)
+    DEFAULT_D_TX_BODY = 3.0             # TX to body (meters)
+    DEFAULT_D_BODY_RX = 2.0             # Body to RX (meters)
+    FRESNEL_MIN_DISPLACEMENT = 0.003    # Min breathing displacement (m)
+    FRESNEL_MAX_DISPLACEMENT = 0.015    # Max breathing displacement (m)
 
     def __init__(self):
         # Per-device state
