@@ -1,15 +1,35 @@
 """
-Camera frame reader — reads JPEG frames from camera_worker's output file.
-camera_worker.py runs as a separate process to avoid MSMF/asyncio conflicts.
+Camera capture — direct OpenCV in same process.
+Opens camera at import time (before asyncio event loop starts).
+MSMF on Windows requires console-attached foreground process.
 """
 import os
 import threading
 import time
 
+# Must be set BEFORE importing cv2
+os.environ["OPENCV_VIDEOIO_MSMF_ENABLE_HW_TRANSFORMS"] = "0"
+
 import cv2
 import numpy as np
 
-FRAME_PATH = os.path.join(os.path.dirname(__file__), ".frame.jpg")
+# Open camera at module load time — before uvicorn's asyncio loop
+_global_cap = None
+_global_ok = False
+
+
+def _init_camera(idx=0):
+    global _global_cap, _global_ok
+    _global_cap = cv2.VideoCapture(idx)
+    if _global_cap.isOpened():
+        ret, _ = _global_cap.read()
+        _global_ok = ret
+        print(f"[camera] Device {idx}: {'ready' if ret else 'opened but no frame'}")
+    else:
+        print(f"[camera] Device {idx}: failed to open")
+
+
+_init_camera(int(os.getenv("CAMERA_INDEX", "0")))
 
 
 class CameraCapture:
@@ -37,54 +57,41 @@ class CameraCapture:
     def start(self):
         if self._running:
             return
+        if not _global_ok:
+            print("[camera] Cannot start — camera not available")
+            return
         self._running = True
-        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True)
         self._thread.start()
 
     def stop(self):
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
+        if _global_cap:
+            _global_cap.release()
 
-    def _read_loop(self):
-        last_mtime = 0.0
+    def _capture_loop(self):
+        cap = _global_cap
+        if cap is None or not cap.isOpened():
+            self._running = False
+            return
+
         frame_count = 0
         t0 = time.monotonic()
 
         while self._running:
-            try:
-                if not os.path.exists(FRAME_PATH):
-                    time.sleep(0.05)
-                    continue
+            ret, frame = cap.read()
+            if not ret:
+                time.sleep(0.01)
+                continue
 
-                mtime = os.path.getmtime(FRAME_PATH)
-                if mtime <= last_mtime:
-                    time.sleep(0.01)
-                    continue
-                last_mtime = mtime
+            with self._lock:
+                self._frame = frame
 
-                with open(FRAME_PATH, "rb") as f:
-                    data = f.read()
-
-                if len(data) < 100:
-                    continue
-
-                frame = cv2.imdecode(
-                    np.frombuffer(data, dtype=np.uint8),
-                    cv2.IMREAD_COLOR,
-                )
-                if frame is not None:
-                    with self._lock:
-                        self._frame = frame
-                    frame_count += 1
-
-                elapsed = time.monotonic() - t0
-                if elapsed >= 1.0:
-                    self._fps_actual = frame_count / elapsed
-                    frame_count = 0
-                    t0 = time.monotonic()
-
-            except (IOError, OSError):
-                time.sleep(0.05)
-
-            time.sleep(0.01)
+            frame_count += 1
+            elapsed = time.monotonic() - t0
+            if elapsed >= 1.0:
+                self._fps_actual = frame_count / elapsed
+                frame_count = 0
+                t0 = time.monotonic()

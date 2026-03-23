@@ -145,17 +145,9 @@ async def lifespan(app: FastAPI):
     global _detect_running, _detect_thread, _loop
     _loop = asyncio.get_running_loop()
 
-    # Start camera and wait for first frame
+    # Camera was opened at import time (before asyncio loop)
     camera.start()
-    print(f"[camera-service] Camera started (device={CAMERA_INDEX})")
-    for _ in range(50):  # wait up to 5 seconds
-        if camera.frame is not None:
-            break
-        await asyncio.sleep(0.1)
-    if camera.frame is not None:
-        print(f"[camera-service] First frame captured")
-    else:
-        print(f"[camera-service] WARNING: no frame after 5s")
+    print(f"[camera-service] Camera capture thread started")
 
     # Load YOLO model (after camera is stable)
     detector.load()
