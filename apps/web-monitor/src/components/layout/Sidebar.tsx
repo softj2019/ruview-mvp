@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, LayoutDashboard, Cpu, Bell, Settings } from 'lucide-react';
+import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { StatusDot } from '@/components/ui/StatusDot';
 
@@ -7,6 +7,7 @@ const navItems = [
   { to: '/', label: '대시보드', icon: LayoutDashboard },
   { to: '/devices', label: '디바이스', icon: Cpu },
   { to: '/events', label: '이벤트', icon: Bell },
+  { to: '/sensing', label: '센싱', icon: Radio },
   { to: '/settings', label: '설정', icon: Settings },
 ];
 

@@ -158,6 +158,392 @@ export class HudController {
 
     // Track current scenario for description/edge updates
     this._currentScenarioKey = null;
+
+    // HUD overlay state
+    this._hudOverlayBuilt = false;
+    this._fpsFrames = [];
+    this._lastFpsUpdate = 0;
+    this._hudConnected = false;
+    this._hudLatency = 0;
+    this._hudMsgCount = 0;
+    this._hudUptime = 0;
+    this._hudStartTime = Date.now();
+  }
+
+  // ============================================================
+  // HUD Overlay — connection, FPS, detection, sensing mode
+  // ============================================================
+
+  initHUDOverlay() {
+    if (this._hudOverlayBuilt) return;
+    this._hudOverlayBuilt = true;
+    this._hudStartTime = Date.now();
+
+    // Inject CSS for HUD overlay panels
+    const style = document.createElement('style');
+    style.textContent = `
+      /* ---- HUD Overlay Panels ---- */
+      .hud-overlay-panel {
+        position: fixed;
+        z-index: 200;
+        pointer-events: none;
+        font-family: 'Courier New', 'Consolas', monospace;
+        color: #88ccff;
+      }
+
+      /* Top-left: Connection Info */
+      #hud-conn-panel {
+        top: 60px;
+        left: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .hud-ov-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11px;
+        line-height: 1.4;
+      }
+      .hud-ov-label {
+        color: #5588aa;
+        min-width: 70px;
+        text-transform: uppercase;
+        font-size: 9px;
+        letter-spacing: 1px;
+      }
+      .hud-ov-value {
+        color: #aaddff;
+        font-weight: bold;
+        font-size: 12px;
+      }
+      .hud-ov-status-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        margin-right: 4px;
+        background: #666;
+        transition: background 0.3s, box-shadow 0.3s;
+      }
+      .hud-ov-status-dot.connected {
+        background: #00ff66;
+        box-shadow: 0 0 6px #00ff66;
+      }
+      .hud-ov-status-dot.disconnected {
+        background: #ff3344;
+        box-shadow: 0 0 6px #ff3344;
+      }
+
+      /* Top-right: Performance / FPS */
+      #hud-perf-panel {
+        top: 60px;
+        right: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 4px;
+      }
+      .hud-ov-fps {
+        font-size: 22px;
+        font-weight: bold;
+        line-height: 1;
+        transition: color 0.3s;
+      }
+      .hud-ov-fps.low  { color: #ff4444; }
+      .hud-ov-fps.mid  { color: #ffaa00; }
+      .hud-ov-fps.high { color: #00ff88; }
+
+      /* Bottom-left: Detection Summary */
+      #hud-detect-panel {
+        bottom: 50px;
+        left: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+      .hud-ov-person-count {
+        font-size: 32px;
+        font-weight: bold;
+        line-height: 1;
+        color: #556677;
+        transition: color 0.3s;
+      }
+      .hud-ov-person-count.active {
+        color: #00ff88;
+        text-shadow: 0 0 8px rgba(0,255,136,0.3);
+      }
+      .hud-ov-conf-bar {
+        width: 120px;
+        height: 6px;
+        background: rgba(20, 30, 50, 0.8);
+        border: 1px solid #223344;
+        border-radius: 3px;
+        overflow: hidden;
+      }
+      .hud-ov-conf-fill {
+        height: 100%;
+        border-radius: 3px;
+        width: 0%;
+        transition: width 0.3s ease, background 0.3s ease;
+        background: #334455;
+      }
+
+      /* Bottom-right: Sensing Mode Badge */
+      #hud-mode-panel {
+        bottom: 50px;
+        right: 16px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 5px;
+      }
+      .hud-ov-mode-badge {
+        padding: 4px 12px;
+        border-radius: 4px;
+        font-size: 12px;
+        font-weight: bold;
+        letter-spacing: 1.5px;
+        text-transform: uppercase;
+      }
+      .hud-ov-mode-badge.csi {
+        background: rgba(0, 100, 200, 0.7);
+        border: 1px solid #0088ff;
+        color: #aaddff;
+      }
+      .hud-ov-mode-badge.camera {
+        background: rgba(200, 80, 0, 0.7);
+        border: 1px solid #ff8800;
+        color: #ffddaa;
+      }
+      .hud-ov-mode-badge.fused {
+        background: rgba(100, 0, 180, 0.7);
+        border: 1px solid #aa44ff;
+        color: #ddbbff;
+      }
+      .hud-ov-mode-badge.demo {
+        background: rgba(120, 80, 0, 0.7);
+        border: 1px solid #ff8800;
+        color: #ffddaa;
+      }
+      .hud-ov-source-label {
+        font-size: 9px;
+        color: #5588aa;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+      }
+
+      /* Corner bracket decorations */
+      .hud-ov-corner {
+        position: fixed;
+        width: 20px;
+        height: 20px;
+        border-color: rgba(100, 150, 200, 0.25);
+        border-style: solid;
+        z-index: 199;
+        pointer-events: none;
+      }
+      .hud-ov-corner.tl { top: 55px; left: 8px; border-width: 1px 0 0 1px; }
+      .hud-ov-corner.tr { top: 55px; right: 8px; border-width: 1px 1px 0 0; }
+      .hud-ov-corner.bl { bottom: 44px; left: 8px; border-width: 0 0 1px 1px; }
+      .hud-ov-corner.br { bottom: 44px; right: 8px; border-width: 0 1px 1px 0; }
+    `;
+    document.head.appendChild(style);
+
+    // Build DOM elements
+    const hud = document.getElementById('hud');
+    if (!hud) return;
+
+    // Corner decorations
+    ['tl', 'tr', 'bl', 'br'].forEach(pos => {
+      const corner = document.createElement('div');
+      corner.className = `hud-ov-corner ${pos}`;
+      document.body.appendChild(corner);
+    });
+
+    // -- Connection Info (top-left) --
+    const connPanel = document.createElement('div');
+    connPanel.id = 'hud-conn-panel';
+    connPanel.className = 'hud-overlay-panel';
+    connPanel.innerHTML = `
+      <div class="hud-ov-row">
+        <span class="hud-ov-status-dot disconnected" id="hud-ov-conn-dot"></span>
+        <span class="hud-ov-value" id="hud-ov-conn-status">Disconnected</span>
+      </div>
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Latency</span>
+        <span class="hud-ov-value" id="hud-ov-latency">-- ms</span>
+      </div>
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Messages</span>
+        <span class="hud-ov-value" id="hud-ov-msg-count">0</span>
+      </div>
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Uptime</span>
+        <span class="hud-ov-value" id="hud-ov-uptime">0s</span>
+      </div>
+    `;
+    document.body.appendChild(connPanel);
+
+    // -- Performance (top-right) --
+    const perfPanel = document.createElement('div');
+    perfPanel.id = 'hud-perf-panel';
+    perfPanel.className = 'hud-overlay-panel';
+    perfPanel.innerHTML = `
+      <div class="hud-ov-fps high" id="hud-ov-fps">-- FPS</div>
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Frame</span>
+        <span class="hud-ov-value" id="hud-ov-frame-time">-- ms</span>
+      </div>
+    `;
+    document.body.appendChild(perfPanel);
+
+    // -- Detection Summary (bottom-left) --
+    const detectPanel = document.createElement('div');
+    detectPanel.id = 'hud-detect-panel';
+    detectPanel.className = 'hud-overlay-panel';
+    detectPanel.innerHTML = `
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Persons</span>
+      </div>
+      <div class="hud-ov-person-count" id="hud-ov-person-count">0</div>
+      <div class="hud-ov-row">
+        <span class="hud-ov-label">Confidence</span>
+        <span class="hud-ov-value" id="hud-ov-conf-pct">0%</span>
+      </div>
+      <div class="hud-ov-conf-bar">
+        <div class="hud-ov-conf-fill" id="hud-ov-conf-fill"></div>
+      </div>
+    `;
+    document.body.appendChild(detectPanel);
+
+    // -- Sensing Mode Badge (bottom-right) --
+    const modePanel = document.createElement('div');
+    modePanel.id = 'hud-mode-panel';
+    modePanel.className = 'hud-overlay-panel';
+    modePanel.innerHTML = `
+      <div class="hud-ov-mode-badge demo" id="hud-ov-mode-badge">DEMO</div>
+      <div class="hud-ov-source-label" id="hud-ov-source-label">Demo Generator</div>
+    `;
+    document.body.appendChild(modePanel);
+
+    // Cache element references
+    this._hudEls = {
+      connDot:      document.getElementById('hud-ov-conn-dot'),
+      connStatus:   document.getElementById('hud-ov-conn-status'),
+      latency:      document.getElementById('hud-ov-latency'),
+      msgCount:     document.getElementById('hud-ov-msg-count'),
+      uptime:       document.getElementById('hud-ov-uptime'),
+      fps:          document.getElementById('hud-ov-fps'),
+      frameTime:    document.getElementById('hud-ov-frame-time'),
+      personCount:  document.getElementById('hud-ov-person-count'),
+      confPct:      document.getElementById('hud-ov-conf-pct'),
+      confFill:     document.getElementById('hud-ov-conf-fill'),
+      modeBadge:    document.getElementById('hud-ov-mode-badge'),
+      sourceLabel:  document.getElementById('hud-ov-source-label'),
+    };
+  }
+
+  /**
+   * Call once per animation frame to track FPS in the overlay.
+   */
+  tickFPS() {
+    const now = performance.now();
+    this._fpsFrames.push(now);
+
+    // Keep only last second of frames
+    while (this._fpsFrames.length > 0 && this._fpsFrames[0] < now - 1000) {
+      this._fpsFrames.shift();
+    }
+
+    // Update FPS display at most 4 times per second
+    if (now - this._lastFpsUpdate > 250 && this._hudEls) {
+      const fps = this._fpsFrames.length;
+      const frameTime = this._fpsFrames.length > 1
+        ? (now - this._fpsFrames[0]) / (this._fpsFrames.length - 1)
+        : 0;
+      this._lastFpsUpdate = now;
+
+      this._hudEls.fps.textContent = `${fps} FPS`;
+      this._hudEls.fps.className = 'hud-ov-fps ' + (
+        fps >= 50 ? 'high' : fps >= 25 ? 'mid' : 'low'
+      );
+      this._hudEls.frameTime.textContent = `${frameTime.toFixed(1)} ms`;
+    }
+  }
+
+  /**
+   * Update HUD overlay connection state. Called when WS state changes.
+   */
+  setHUDConnection(connected, latencyMs) {
+    this._hudConnected = connected;
+    if (latencyMs !== undefined) this._hudLatency = latencyMs;
+  }
+
+  /**
+   * Update all HUD overlay elements. Called from updateHUD().
+   */
+  _updateHUDOverlay(data) {
+    if (!this._hudEls) return;
+
+    const els = this._hudEls;
+    const cls = data.classification || {};
+    const isLive = data?.source === 'hardware';
+
+    // ---- Connection Info ----
+    this._hudMsgCount++;
+    const connected = isLive || this._hudConnected;
+    els.connDot.className = `hud-ov-status-dot ${connected ? 'connected' : 'disconnected'}`;
+    els.connStatus.textContent = connected ? 'Connected' : 'Disconnected';
+    els.latency.textContent = this._hudLatency > 0 ? `${Math.round(this._hudLatency)} ms` : '-- ms';
+    els.msgCount.textContent = this._hudMsgCount.toLocaleString();
+
+    // Uptime
+    const uptimeSec = Math.floor((Date.now() - this._hudStartTime) / 1000);
+    if (uptimeSec < 60) {
+      els.uptime.textContent = `${uptimeSec}s`;
+    } else if (uptimeSec < 3600) {
+      els.uptime.textContent = `${Math.floor(uptimeSec / 60)}m ${uptimeSec % 60}s`;
+    } else {
+      const h = Math.floor(uptimeSec / 3600);
+      const m = Math.floor((uptimeSec % 3600) / 60);
+      els.uptime.textContent = `${h}h ${m}m`;
+    }
+
+    // ---- Detection Summary ----
+    const personCount = data.estimated_persons || 0;
+    els.personCount.textContent = personCount;
+    els.personCount.className = `hud-ov-person-count${personCount > 0 ? ' active' : ''}`;
+
+    const conf = cls.confidence || 0;
+    const confPct = (conf * 100).toFixed(1);
+    els.confPct.textContent = `${confPct}%`;
+    els.confFill.style.width = `${conf * 100}%`;
+    // Color temperature: red (low) -> yellow (mid) -> green (high)
+    const confHue = conf * 120;
+    els.confFill.style.background = `hsl(${confHue}, 100%, 45%)`;
+
+    // ---- Sensing Mode Badge ----
+    const dataSource = this._obs.settings?.dataSource || 'demo';
+    let modeKey, modeLabel, sourceLabel;
+    if (isLive) {
+      // Determine mode from data
+      const hasCsi = !!(data.features?.variance || data.features?.spectral_power);
+      const hasCam = !!data.camera_detection;
+      if (hasCsi && hasCam) {
+        modeKey = 'fused'; modeLabel = 'FUSED'; sourceLabel = 'CSI + Camera';
+      } else if (hasCam) {
+        modeKey = 'camera'; modeLabel = 'CAMERA'; sourceLabel = 'Camera Detection';
+      } else {
+        modeKey = 'csi'; modeLabel = 'CSI'; sourceLabel = 'WiFi CSI Sensing';
+      }
+    } else {
+      modeKey = 'demo'; modeLabel = 'DEMO'; sourceLabel = 'Demo Generator';
+    }
+    els.modeBadge.textContent = modeLabel;
+    els.modeBadge.className = `hud-ov-mode-badge ${modeKey}`;
+    els.sourceLabel.textContent = sourceLabel;
   }
 
   // ============================================================
@@ -489,6 +875,9 @@ export class HudController {
       this._updateScenarioDescription(scenarioKey);
       this._updateEdgeModules(scenarioKey);
     }
+
+    // Update HUD overlay panels (connection, FPS, detection, sensing mode)
+    this._updateHUDOverlay(data);
   }
 
   // ============================================================

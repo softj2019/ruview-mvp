@@ -145,6 +145,7 @@ class Observatory {
     this._initKeyboard();
     this._hud.initSettings();
     this._hud.initQuickSelect();
+    this._hud.initHUDOverlay();
     window.addEventListener('resize', () => this._onResize());
 
     // Start
@@ -742,6 +743,7 @@ class Observatory {
     this._updateSignalFieldFloor(data, elapsed);
     this._updateVitalsOracle(data, elapsed);
     this._updatePhaseConstellation(data, elapsed);
+    this._hud.tickFPS();
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);
 

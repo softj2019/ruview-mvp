@@ -3,6 +3,7 @@ import { Routes, Route } from 'react-router-dom';
 import DashboardPage from './pages/DashboardPage';
 import DevicesPage from './pages/DevicesPage';
 import EventsPage from './pages/EventsPage';
+import SensingPage from './pages/SensingPage';
 import SettingsPage from './pages/SettingsPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
@@ -78,6 +79,7 @@ export default function App() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/devices" element={<DevicesPage />} />
           <Route path="/events" element={<EventsPage />} />
+          <Route path="/sensing" element={<SensingPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
       </Routes>
