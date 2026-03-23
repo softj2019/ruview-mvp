@@ -632,13 +632,26 @@ class Observatory {
   }
 
   _autoDetectLive() {
-    // Probe sensing server health — prioritize signal-adapter port
     const host = window.location.hostname || 'localhost';
+    const isCloud = host.includes('pages.dev') || host.includes('workers.dev');
+
+    // On Cloudflare: connect directly via Worker relay (no health probe needed)
+    if (isCloud) {
+      const wsUrl = 'wss://ruview-relay.dev-softj.workers.dev/api/front/ws?session=default';
+      console.log('[Observatory] Cloud mode — connecting to relay:', wsUrl);
+      this.settings.dataSource = 'ws';
+      this.settings.wsUrl = wsUrl;
+      this._autoDetecting = false;
+      this._connectWS(wsUrl);
+      return;
+    }
+
+    // Local: probe sensing server health
     const candidates = [
-      `http://${host}:8001`,                     // RuView signal adapter (priority)
-      window.location.origin,                   // same origin (vite proxy)
-      `http://${host}:8765`,                     // default WS port
-      `http://${host}:3000`,                     // default HTTP port
+      `http://${host}:8001`,
+      window.location.origin,
+      `http://${host}:8765`,
+      `http://${host}:3000`,
     ];
     // Deduplicate
     const unique = [...new Set(candidates)];

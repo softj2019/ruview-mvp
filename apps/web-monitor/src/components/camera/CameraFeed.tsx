@@ -8,7 +8,11 @@ function getCamUrl(): string {
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
     return 'http://localhost:8002';
   }
-  return `http://${hostname}:8002`;
+  // Cloud deployment: camera not directly accessible
+  if (hostname.includes('pages.dev') || hostname.includes('workers.dev')) {
+    return '';  // Disable camera on cloud
+  }
+  return `${window.location.protocol}//${hostname}:8002`;
 }
 
 const CAM_BASE = getCamUrl();
