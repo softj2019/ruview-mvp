@@ -147,7 +147,8 @@ class SignalAdapterRuntime:
         self.devices: dict[str, dict[str, Any]] = {}
         self.zones: list[dict[str, Any]] = [dict(z) for z in DEFAULT_ZONES]
         self.transport = None
-        # Broadcast throttling: max once per 200ms
+        self.bridge: "BridgeClient | None" = None
+        # Broadcast throttling
         self._last_broadcast_time = 0.0
         self._broadcast_interval = 0.2  # seconds
         # Lazy-init state (P3-13 fix)
@@ -316,15 +317,18 @@ class SignalAdapterRuntime:
         return self.devices[device_id]
 
     async def broadcast(self, message_type: str, payload: dict[str, Any]) -> None:
-        await self.manager.broadcast(
-            json.dumps(
-                {
-                    "type": message_type,
-                    "payload": payload,
-                    "timestamp": iso_now(),
-                }
-            )
+        encoded = json.dumps(
+            {
+                "type": message_type,
+                "payload": payload,
+                "timestamp": iso_now(),
+            }
         )
+        # Local WebSocket clients
+        await self.manager.broadcast(encoded)
+        # Cloudflare relay (if bridge connected)
+        if self.bridge and self.bridge.is_connected:
+            await self.bridge.send(encoded)
 
     async def check_offline_devices(self) -> None:
         """Mark devices as offline if no data received for 30 seconds."""
@@ -575,9 +579,22 @@ async def lifespan(app: FastAPI):
     )
     runtime.transport = transport
     offline_task = asyncio.create_task(_offline_check_loop())
+
+    # Cloudflare bridge (outbound relay for external access)
+    bridge_url = os.getenv("RUVIEW_BRIDGE_URL")
+    bridge_session = os.getenv("RUVIEW_BRIDGE_SESSION", "default")
+    bridge_token = os.getenv("RUVIEW_BRIDGE_TOKEN")
+    if bridge_url:
+        from bridge_client import BridgeClient
+        runtime.bridge = BridgeClient(bridge_url, bridge_session, bridge_token)
+        await runtime.bridge.start()
+        print(f"[signal-adapter] Bridge connected to {bridge_url}")
+
     print(f"[signal-adapter] Starting up on UDP {UDP_HOST}:{UDP_PORT}...")
     yield
     print("[signal-adapter] Shutting down...")
+    if runtime.bridge:
+        runtime.bridge.stop()
     offline_task.cancel()
     if runtime.transport is not None:
         runtime.transport.close()

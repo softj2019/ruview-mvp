@@ -15,9 +15,18 @@ import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
   const { hostname } = window.location;
+
+  // Local development
   if (hostname === 'localhost' || hostname === '127.0.0.1') {
     return 'ws://localhost:8001/ws/events';
   }
+
+  // Cloudflare Pages deployment — connect to relay Worker
+  if (hostname.includes('pages.dev') || hostname.includes('workers.dev')) {
+    const relayHost = hostname.replace('ruview-monitor.pages.dev', 'ruview-relay.YOUR_SUBDOMAIN.workers.dev');
+    return `wss://${relayHost}/api/front/ws?session=default`;
+  }
+
   const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${wsProtocol}//${hostname}/ws/events`;
 }
