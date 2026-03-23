@@ -431,9 +431,8 @@ class SignalAdapterRuntime:
             device["csi_per_person_breathing"] = processed.per_person_breathing
 
         # CSI pose classification
-        if processed.csi_pose is not None:
-            device["csi_pose"] = processed.csi_pose
-            device["csi_pose_confidence"] = processed.csi_pose_confidence
+        device["csi_pose"] = processed.csi_pose or "unknown"
+        device["csi_pose_confidence"] = processed.csi_pose_confidence
 
         # Server-side vitals extraction (supplement firmware vitals)
         if processed.breathing_rate is not None:
