@@ -48,6 +48,8 @@ class ProcessedCSI:
     csi_pose: str | None = None
     csi_pose_confidence: float = 0.0
     hrv: dict | None = None
+    gesture: str | None = None
+    gesture_confidence: float = 0.0
 
 
 class WelfordStats:
@@ -125,6 +127,9 @@ class CSIProcessor:
         self._hr_history: dict[str, deque] = {}
         # Cached HRV result per device
         self._last_hrv: dict[str, dict | None] = {}
+        # Per-device motion_index history for gesture recognition (last 60 = 3s at 20Hz)
+        self._gesture_history: dict[str, deque] = {}
+        self._gesture_history_size = 60
 
         # Butterworth filter coefficients (computed once)
         self._breath_sos = scipy_signal.butter(
@@ -260,6 +265,9 @@ class CSIProcessor:
         # --- Step 8: HRV analysis (Phase Additional C) ---
         hrv = self._update_hrv(device_id, heart_rate)
 
+        # --- Step 9: Gesture recognition via DTW (Additional B) ---
+        gesture, gesture_confidence = self._detect_gesture(device_id, motion_index)
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -282,6 +290,8 @@ class CSIProcessor:
             csi_pose=csi_pose,
             csi_pose_confidence=csi_pose_confidence,
             hrv=hrv,
+            gesture=gesture,
+            gesture_confidence=gesture_confidence,
         )
 
     # ------------------------------------------------------------------
@@ -447,6 +457,95 @@ class CSIProcessor:
                 return ("sitting", 0.8)
             # Low motion but no breathing detected — might still be sitting/standing
             return ("sitting", 0.5)
+
+        return (None, 0.0)
+
+    # ------------------------------------------------------------------
+    # Gesture recognition via Dynamic Time Warping (Additional B)
+    # ------------------------------------------------------------------
+
+    # Gesture templates: normalized motion_index patterns.
+    # Values represent relative motion intensity (0.0 = low, 1.0 = peak).
+    # Each template has a name, expected duration, and pattern sequence.
+    GESTURE_TEMPLATES: dict[str, list[float]] = {
+        # "wave": oscillating high-low pattern ~1.5s (30 samples at 20Hz)
+        "wave": [0.1, 0.8, 0.1, 0.8, 0.1],
+        # "circle": gradual rise, peak, gradual fall ~2s (40 samples at 20Hz)
+        "circle": [0.1, 0.3, 0.6, 1.0, 0.8, 0.5, 0.2],
+        # "swipe": sharp rise then sharp fall ~0.5s (10 samples at 20Hz)
+        "swipe": [0.1, 0.9, 0.1],
+    }
+    GESTURE_DTW_THRESHOLD = 0.3  # Max normalized DTW distance for a match
+
+    @staticmethod
+    def _dtw_distance(seq_a: np.ndarray, seq_b: np.ndarray) -> float:
+        """Compute Dynamic Time Warping distance between two 1-D sequences.
+
+        Returns normalized distance (divided by path length).
+        """
+        n, m = len(seq_a), len(seq_b)
+        if n == 0 or m == 0:
+            return float("inf")
+
+        # Cost matrix (n+1 x m+1), init to inf
+        dtw = np.full((n + 1, m + 1), np.inf)
+        dtw[0, 0] = 0.0
+
+        for i in range(1, n + 1):
+            for j in range(1, m + 1):
+                cost = abs(seq_a[i - 1] - seq_b[j - 1])
+                dtw[i, j] = cost + min(dtw[i - 1, j], dtw[i, j - 1], dtw[i - 1, j - 1])
+
+        # Normalize by path length (n + m)
+        return dtw[n, m] / (n + m)
+
+    def _detect_gesture(self, device_id: str, motion_index: float) -> tuple[str | None, float]:
+        """Detect gesture from recent motion_index history using DTW.
+
+        Tracks per-device motion_index history (last 60 samples = 3 seconds).
+        Compares the tail of the history against each gesture template.
+
+        Returns (gesture_name, confidence) or (None, 0.0) if no match.
+        """
+        # Update history
+        if device_id not in self._gesture_history:
+            self._gesture_history[device_id] = deque(maxlen=self._gesture_history_size)
+        self._gesture_history[device_id].append(motion_index)
+
+        history = self._gesture_history[device_id]
+        if len(history) < 10:
+            return (None, 0.0)
+
+        # Normalize the history to [0, 1] range
+        hist_arr = np.array(list(history), dtype=np.float64)
+        h_min, h_max = hist_arr.min(), hist_arr.max()
+        if h_max - h_min < 1e-6:
+            return (None, 0.0)  # flat signal — no gesture
+        hist_norm = (hist_arr - h_min) / (h_max - h_min)
+
+        best_gesture: str | None = None
+        best_distance = float("inf")
+
+        for gesture_name, template in self.GESTURE_TEMPLATES.items():
+            template_arr = np.array(template, dtype=np.float64)
+
+            # Compare against the most recent N samples where N scales
+            # with the template length (template at 20Hz equivalent).
+            # wave: ~30 samples, circle: ~40 samples, swipe: ~10 samples
+            # We use len(template) * 6 as approximate window (each template
+            # point represents ~6 real samples at 20Hz).
+            window_size = min(len(template) * 8, len(hist_norm))
+            segment = hist_norm[-window_size:]
+
+            dist = self._dtw_distance(segment, template_arr)
+            if dist < best_distance:
+                best_distance = dist
+                best_gesture = gesture_name
+
+        if best_distance < self.GESTURE_DTW_THRESHOLD and best_gesture is not None:
+            # Confidence: inverse of distance, clamped to [0, 1]
+            confidence = max(0.0, min(1.0, 1.0 - best_distance / self.GESTURE_DTW_THRESHOLD))
+            return (best_gesture, round(confidence, 3))
 
         return (None, 0.0)
 

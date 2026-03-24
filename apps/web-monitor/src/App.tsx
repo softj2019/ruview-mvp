@@ -13,6 +13,8 @@ import { useDeviceStore, type Device } from '@/stores/deviceStore';
 import { useZoneStore, type Zone } from '@/stores/zoneStore';
 import { useEventStore, type DetectionEvent } from '@/stores/eventStore';
 import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
+import { useAlertStore, type AlertItem } from '@/stores/alertStore';
+import AlertToast from '@/components/alerts/AlertToast';
 
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
@@ -38,6 +40,7 @@ function DataProvider({ children }: { children: React.ReactNode }) {
   const setZones = useZoneStore((s) => s.setZones);
   const addEvent = useEventStore((s) => s.addEvent);
   const addSignalPoint = useSignalStore((s) => s.addPoint);
+  const addAlert = useAlertStore((s) => s.addAlert);
 
   const handleMessage = useCallback(
     (data: unknown) => {
@@ -66,9 +69,12 @@ function DataProvider({ children }: { children: React.ReactNode }) {
         case 'camera_detection':
           // camera detections update zones via zone_update; no separate handling needed
           break;
+        case 'alert':
+          addAlert(msg.payload as unknown as AlertItem);
+          break;
       }
     },
-    [setDevices, setZones, addEvent, addSignalPoint],
+    [setDevices, setZones, addEvent, addSignalPoint, addAlert],
   );
 
   useWebSocket({
@@ -78,7 +84,12 @@ function DataProvider({ children }: { children: React.ReactNode }) {
     onClose: () => console.log('[WS] Disconnected'),
   });
 
-  return <>{children}</>;
+  return (
+    <>
+      <AlertToast />
+      {children}
+    </>
+  );
 }
 
 export default function App() {

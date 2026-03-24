@@ -20,12 +20,14 @@ try:
     from .event_engine import EventEngine
     from .supabase_client import get_supabase
     from .fall_detector import FallDetector, extract_features as extract_fall_features
+    from .notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
     from event_engine import EventEngine
     from supabase_client import get_supabase
     from fall_detector import FallDetector, extract_features as extract_fall_features
+    from notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -208,6 +210,20 @@ class SignalAdapterRuntime:
         self.fall_detector = FallDetector()
         self._motion_history: dict[str, list[float]] = {}  # device_id -> recent motion values
         self._motion_history_max = 50  # keep last 50 motion samples per device
+        # Alert notification system (Phase 3-5)
+        self.notifier = Notifier()
+        self.notifier.add_backend(ConsoleBackend())
+        # WebSocket and Webhook backends are added after broadcast is available (see _init_notifier_backends)
+        self._notifier_backends_ready = False
+        # Track previous device status for online/offline transitions
+        self._prev_device_status: dict[str, str] = {}
+
+    def _ensure_notifier_backends(self) -> None:
+        """Lazily add WebSocket and Webhook backends once broadcast is available."""
+        if not self._notifier_backends_ready:
+            self.notifier.add_backend(WebSocketBackend(self.broadcast))
+            self.notifier.add_backend(WebhookBackend())
+            self._notifier_backends_ready = True
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -416,12 +432,14 @@ class SignalAdapterRuntime:
 
     async def check_offline_devices(self) -> None:
         """Mark devices as offline if no data received for 30 seconds."""
+        self._ensure_notifier_backends()
         now = datetime.now(timezone.utc)
         changed = False
         for dev in self.devices.values():
             last = datetime.fromisoformat(dev["lastSeen"])
             delta = (now - last).total_seconds()
             new_status = "online" if delta < 30 else "offline"
+            prev_status = self._prev_device_status.get(dev["id"], dev["status"])
             if dev["status"] != new_status:
                 dev["status"] = new_status
                 changed = True
@@ -430,6 +448,22 @@ class SignalAdapterRuntime:
                                 "csi_heart_rate", "motion_energy", "presence_score",
                                 "n_persons", "csi_estimated_persons"):
                         dev[key] = 0
+                    # Alert: device went offline
+                    await self.notifier.notify(
+                        f"device_offline_{dev['id']}",
+                        f"{dev['name']} ({dev['id']}) is offline (no data for {int(delta)}s)",
+                        "warning",
+                        {"device_id": dev["id"], "last_seen": dev["lastSeen"]},
+                    )
+                elif new_status == "online" and prev_status == "offline":
+                    # Alert: device came back online
+                    await self.notifier.notify(
+                        f"device_online_{dev['id']}",
+                        f"{dev['name']} ({dev['id']}) is back online",
+                        "info",
+                        {"device_id": dev["id"]},
+                    )
+            self._prev_device_status[dev["id"]] = new_status
         if changed:
             await self.broadcast_devices()
             self._recompute_presence_count()
@@ -508,6 +542,9 @@ class SignalAdapterRuntime:
         if len(self._motion_history[did]) > self._motion_history_max:
             self._motion_history[did] = self._motion_history[did][-self._motion_history_max:]
 
+        # Ensure notifier backends are ready
+        self._ensure_notifier_backends()
+
         # When fall is suspected by event_engine, run ML fall detector
         fall_events = [e for e in events if e.type == "fall_suspected"]
         for fe in fall_events:
@@ -524,6 +561,27 @@ class SignalAdapterRuntime:
                     # ML says not a fall — downgrade severity
                     fe.severity = "warning"
                     fe.type = "fall_suspected_low_confidence"
+                else:
+                    # ML confirmed fall — send critical alert
+                    await self.notifier.notify(
+                        "fall",
+                        f"Fall detected on {did} (confidence: {confidence:.2f})",
+                        "critical",
+                        {
+                            "device_id": did,
+                            "confidence": confidence,
+                            "features": features,
+                        },
+                    )
+
+        # Broadcast gesture if detected
+        if processed.gesture is not None:
+            await self.broadcast("gesture", {
+                "device_id": processed.device_id,
+                "gesture": processed.gesture,
+                "confidence": processed.gesture_confidence,
+                "timestamp": processed.timestamp,
+            })
 
         # Include breathing and heart rate in signal payload for chart
         dev = self.devices.get(processed.device_id, {})
@@ -1200,6 +1258,12 @@ async def fall_stats():
     """Get fall detection training data statistics."""
     stats = runtime.fall_detector.get_training_stats()
     return stats
+
+
+@app.get("/api/alerts/history")
+async def alerts_history():
+    """Return last 50 alerts."""
+    return {"data": runtime.notifier.get_history()}
 
 
 @app.post("/api/csi/ingest")
