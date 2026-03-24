@@ -183,8 +183,8 @@ class CSIProcessor:
         n_sc = len(amplitude)
         self._update_subcarrier_variance(device_id, amplitude, n_sc)
 
-        # Select top-K subcarriers
-        top_k_indices = self._select_top_k(device_id, n_sc)
+        # Select top-K subcarriers (sensitivity-based filtering)
+        top_k_indices = self._select_top_k_sensitivity(device_id, n_sc)
         self._top_k[device_id] = top_k_indices
 
         # Store phase history for top-K subcarriers
@@ -716,6 +716,53 @@ class CSIProcessor:
 
         # Get variance for each subcarrier
         variances = [(i, stats[i].variance()) for i in range(min(n_sc, len(stats)))]
+        variances.sort(key=lambda x: x[1], reverse=True)
+        return [idx for idx, _ in variances[:self.TOP_K]]
+
+    SENSITIVITY_RATIO_THRESHOLD = 2.0  # Variance ratio threshold for "sensitive" subcarrier
+
+    def _select_top_k_sensitivity(self, device_id: str, n_sc: int) -> list[int]:
+        """Select top-K subcarriers using sensitivity-based filtering.
+
+        Ref: WiDance subcarrier_selection.rs — variance ratio method.
+
+        Instead of raw variance, computes variance ratio:
+            ratio = var(subcarrier) / median(all_variances)
+        Subcarriers with ratio > 2.0 are "sensitive" — their variance is
+        driven by human presence rather than background noise.  Among the
+        sensitive set, the top-K by variance are returned.
+
+        Falls back to plain top-K when fewer than TOP_K subcarriers are
+        sensitive (early frames / empty room).
+        """
+        stats = self._subcarrier_var.get(device_id, [])
+        count = min(n_sc, len(stats))
+        if count < self.TOP_K:
+            return list(range(count))
+
+        # Compute per-subcarrier variance
+        variances = [(i, stats[i].variance()) for i in range(count)]
+        all_vars = [v for _, v in variances]
+
+        # Median of all variances (guard against zero)
+        median_var = float(np.median(all_vars)) if all_vars else 0.0
+
+        if median_var > 1e-15:
+            # Filter to "sensitive" subcarriers: ratio > threshold
+            sensitive = [
+                (i, v) for i, v in variances
+                if (v / median_var) > self.SENSITIVITY_RATIO_THRESHOLD
+            ]
+        else:
+            # All variances near zero — no meaningful filtering possible
+            sensitive = list(variances)
+
+        # If enough sensitive subcarriers, pick top-K among them by variance
+        if len(sensitive) >= self.TOP_K:
+            sensitive.sort(key=lambda x: x[1], reverse=True)
+            return [idx for idx, _ in sensitive[:self.TOP_K]]
+
+        # Fallback: not enough sensitive subcarriers, use plain top-K
         variances.sort(key=lambda x: x[1], reverse=True)
         return [idx for idx, _ in variances[:self.TOP_K]]
 

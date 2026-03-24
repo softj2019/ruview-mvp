@@ -196,6 +196,10 @@ class SignalAdapterRuntime:
         self._kalman = KalmanSmooth(process_noise=0.5, measurement_noise=2.0)
         # Camera detection timestamp for time-based fusion staleness check
         self._camera_detection_ts: float = 0.0  # monotonic seconds
+        # Last time camera detected at least one person (monotonic seconds)
+        self._camera_last_person_ts: float = 0.0
+        # Active modality for confidence-based switching (Phase 5-4)
+        self._active_modality: str = "csi_only"
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -318,7 +322,23 @@ class SignalAdapterRuntime:
         if camera_age > 2.0:
             camera = 0  # stale camera data — use CSI-only
 
-        total = max(camera, fused, nodes_with_presence, nodes_breathing, csi_person_max)
+        # --- Confidence-based modality switching (Phase 5-4) ---
+        # Track ambient light approximation: camera detecting persons = light enough
+        if camera > 0:
+            self._camera_last_person_ts = _time.monotonic()
+
+        camera_person_age = _time.monotonic() - self._camera_last_person_ts
+        if self._camera_last_person_ts > 0 and camera_person_age <= 30.0:
+            # Camera has detected persons within last 30s — camera+CSI mode
+            self._active_modality = "camera+csi"
+            # Weighted fusion: camera 80%, CSI 20%
+            csi_estimate = max(fused, nodes_with_presence, nodes_breathing, csi_person_max)
+            total = round(camera * 0.8 + csi_estimate * 0.2)
+            total = max(total, 1)  # at least 1 if camera saw someone recently
+        else:
+            # Camera hasn't detected anyone for 30+ seconds (darkness/occlusion)
+            self._active_modality = "csi_only"
+            total = max(camera, fused, nodes_with_presence, nodes_breathing, csi_person_max)
 
         # --- Per-zone presence counts ---
         self._recompute_zone_presence()
@@ -462,6 +482,7 @@ class SignalAdapterRuntime:
             "calibrated": self._empty_room_calibrated,
             "calibrated_at": self._empty_room_calibrated_at,
             "presenceCount": total_presence,
+            "active_modality": self._active_modality,
             "onlineDevices": online_count,
             "zones": zone_details,
             "summary": " ".join(summary_parts),
@@ -688,6 +709,7 @@ class SignalAdapterRuntime:
             "timestamp_kst": now_kst.strftime("%Y-%m-%d %H:%M KST"),
             "online_devices": len(online_devices),
             "presence_count": total_presence,
+            "active_modality": self._active_modality,
             "calibration_complete": all_calibrated,
             "calibration": calibration,
             "zones": zones_summary,

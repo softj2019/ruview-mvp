@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { AreaChart, Area, ResponsiveContainer } from 'recharts';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { useDeviceStore } from '@/stores/deviceStore';
 
-type PoseLabel = 'sitting' | 'standing' | 'walking' | 'unknown';
+type PoseLabel = 'sitting' | 'standing' | 'walking' | 'fallen' | 'unknown';
 
 interface CameraState {
   imgSrc: string | null;
@@ -28,6 +29,7 @@ const poseColors: Record<PoseLabel, string> = {
   sitting: 'text-blue-400',
   standing: 'text-emerald-400',
   walking: 'text-amber-400',
+  fallen: 'text-red-400',
   unknown: 'text-gray-500',
 };
 
@@ -35,8 +37,63 @@ const poseLabels: Record<PoseLabel, string> = {
   sitting: '앉음',
   standing: '서있음',
   walking: '걷는중',
+  fallen: '넘어짐',
   unknown: '미감지',
 };
+
+const poseBgColors: Record<PoseLabel, string> = {
+  sitting: 'bg-blue-500',
+  standing: 'bg-emerald-500',
+  walking: 'bg-yellow-500',
+  fallen: 'bg-red-500',
+  unknown: 'bg-gray-600',
+};
+
+interface PoseTrailEntry {
+  pose: PoseLabel;
+  timestamp: number;
+}
+
+interface ConfidenceEntry {
+  value: number;
+}
+
+function PoseTrailBar({ trail }: { trail: PoseTrailEntry[] }) {
+  if (trail.length === 0) return null;
+  return (
+    <div className="flex items-center gap-0.5 mt-1.5">
+      {trail.map((entry, i) => (
+        <div
+          key={i}
+          className={`h-2 flex-1 rounded-sm ${poseBgColors[entry.pose]}`}
+          title={`${poseLabels[entry.pose]}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+function ConfidenceSparkline({ data }: { data: ConfidenceEntry[] }) {
+  if (data.length < 2) return null;
+  return (
+    <div className="mt-1.5" style={{ width: 100, height: 24 }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <AreaChart data={data} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+          <Area
+            type="monotone"
+            dataKey="value"
+            stroke="#22d3ee"
+            fill="#22d3ee"
+            fillOpacity={0.15}
+            strokeWidth={1}
+            dot={false}
+            isAnimationActive={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
 
 function ConfidenceBar({ value, className }: { value: number; className?: string }) {
   return (
@@ -77,6 +134,50 @@ export default function PoseFusionPage() {
     pose: 'unknown',
     confidence: 0,
   });
+
+  // Pose trail: last 10 pose changes per device
+  const poseTrailRef = useRef<Map<string, PoseTrailEntry[]>>(new Map());
+  const [poseTrails, setPoseTrails] = useState<Map<string, PoseTrailEntry[]>>(new Map());
+
+  // Confidence trend: last 20 values per device
+  const confTrendRef = useRef<Map<string, ConfidenceEntry[]>>(new Map());
+  const [confTrends, setConfTrends] = useState<Map<string, ConfidenceEntry[]>>(new Map());
+
+  // Track pose changes and confidence for each device
+  const prevPosesRef = useRef<Map<string, PoseLabel>>(new Map());
+
+  const updateTrails = useCallback(() => {
+    let trailChanged = false;
+    let confChanged = false;
+
+    for (const device of devices) {
+      const pose = poseFromEnergy(device.motion_energy);
+      const conf = poseConfidence(device.motion_energy);
+      const prevPose = prevPosesRef.current.get(device.id);
+
+      // Pose trail: only add on change
+      if (prevPose !== pose) {
+        prevPosesRef.current.set(device.id, pose);
+        const trail = poseTrailRef.current.get(device.id) ?? [];
+        const updated = [...trail, { pose, timestamp: Date.now() }].slice(-10);
+        poseTrailRef.current.set(device.id, updated);
+        trailChanged = true;
+      }
+
+      // Confidence trend: add every tick
+      const trend = confTrendRef.current.get(device.id) ?? [];
+      const updatedTrend = [...trend, { value: conf }].slice(-20);
+      confTrendRef.current.set(device.id, updatedTrend);
+      confChanged = true;
+    }
+
+    if (trailChanged) setPoseTrails(new Map(poseTrailRef.current));
+    if (confChanged) setConfTrends(new Map(confTrendRef.current));
+  }, [devices]);
+
+  useEffect(() => {
+    updateTrails();
+  }, [updateTrails]);
 
   // Refresh camera snapshot every 2 seconds
   useEffect(() => {
@@ -198,6 +299,22 @@ export default function PoseFusionPage() {
                             {Math.round(conf * 100)}%
                           </span>
                         </div>
+
+                        {/* Pose Trail */}
+                        {(poseTrails.get(device.id)?.length ?? 0) > 0 && (
+                          <div>
+                            <span className="text-[10px] text-gray-600">포즈 변화</span>
+                            <PoseTrailBar trail={poseTrails.get(device.id)!} />
+                          </div>
+                        )}
+
+                        {/* Confidence Sparkline */}
+                        {(confTrends.get(device.id)?.length ?? 0) >= 2 && (
+                          <div className="flex items-center gap-2">
+                            <span className="text-[10px] text-gray-600 shrink-0">신뢰도 추이</span>
+                            <ConfidenceSparkline data={confTrends.get(device.id)!} />
+                          </div>
+                        )}
                       </div>
                     );
                   })}
