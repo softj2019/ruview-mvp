@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  signal-adapter:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.signal-adapter
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  camera-service:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.camera
+    ports:
+      - "8002:8002"
+    environment:
+      - CAMERA_INDEX=0
+    # Uncomment on Linux to pass webcam device:
+    # devices:
+    #   - /dev/video0:/dev/video0
+    depends_on:
+      signal-adapter:
+        condition: service_healthy
+    restart: unless-stopped
+
+  web-monitor:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.web
+    ports:
+      - "5280:80"
+    depends_on:
+      signal-adapter:
+        condition: service_healthy
+    restart: unless-stopped

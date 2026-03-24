@@ -42,6 +42,9 @@ SIGNAL_ADAPTER_URL = os.getenv("SIGNAL_ADAPTER_URL", "http://localhost:8001")
 _zoom_level = 1.0  # 1.0 = no zoom, 2.0 = 2x, etc.
 _zoom_center = [0.5, 0.5]  # normalized center (0-1)
 
+# Privacy mode: blur faces when True
+_privacy_mode = False
+
 # ---- Globals ----
 
 camera = CameraCapture(device_index=CAMERA_INDEX, fps=CAMERA_FPS)
@@ -227,6 +230,10 @@ def _generate_mjpeg():
         # Apply digital zoom
         zoomed = _apply_zoom(frame)
 
+        # Apply face blur before overlay when privacy mode is on
+        if _privacy_mode:
+            zoomed = detector.blur_faces(zoomed)
+
         # Draw overlay
         overlay_frame = detector.draw_overlay(zoomed)
 
@@ -255,6 +262,9 @@ async def snapshot():
     if frame is None:
         return Response(status_code=503, content="Camera not ready")
     zoomed = _apply_zoom(frame)
+    # Apply face blur before overlay when privacy mode is on
+    if _privacy_mode:
+        zoomed = detector.blur_faces(zoomed)
     overlay_frame = detector.draw_overlay(zoomed)
     _, jpeg = cv2.imencode(".jpg", overlay_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return Response(content=jpeg.tobytes(), media_type="image/jpeg")
@@ -302,6 +312,21 @@ async def set_zoom(body: dict):
     _zoom_level = max(1.0, min(5.0, float(level)))
     _zoom_center = [max(0, min(1, float(center[0]))), max(0, min(1, float(center[1])))]
     return {"level": _zoom_level, "center": _zoom_center}
+
+
+# ---- Privacy Endpoints ----
+
+@app.get("/cam/privacy")
+async def get_privacy():
+    return {"privacy_mode": _privacy_mode}
+
+
+@app.put("/cam/privacy")
+async def set_privacy(body: dict):
+    """Enable/disable face blurring privacy mode."""
+    global _privacy_mode
+    _privacy_mode = bool(body.get("privacy_mode", False))
+    return {"privacy_mode": _privacy_mode}
 
 
 # ---- Calibration Endpoints ----

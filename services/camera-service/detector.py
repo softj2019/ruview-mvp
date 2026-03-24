@@ -124,6 +124,55 @@ class Detector:
 
         return dets
 
+    def blur_faces(self, frame: np.ndarray, detections: list[Detection] | None = None) -> np.ndarray:
+        """Blur face regions based on nose/eye keypoints for privacy protection."""
+        dets = detections or self.detections
+        out = frame.copy()
+        h, w = out.shape[:2]
+
+        for det in dets:
+            if det.keypoints is None or det.class_name != "person":
+                continue
+
+            kps = det.keypoints
+            kp_threshold = 0.3
+
+            # Keypoint indices: 0=nose, 1=left_eye, 2=right_eye
+            face_kp_indices = [0, 1, 2]
+            valid_pts = []
+            for idx in face_kp_indices:
+                if idx < len(kps) and kps[idx][2] > kp_threshold:
+                    valid_pts.append((kps[idx][0], kps[idx][1]))
+
+            if len(valid_pts) < 2:
+                continue
+
+            xs = [p[0] for p in valid_pts]
+            ys = [p[1] for p in valid_pts]
+            cx = (min(xs) + max(xs)) / 2.0
+            cy = (min(ys) + max(ys)) / 2.0
+            half_w = (max(xs) - min(xs)) / 2.0
+            half_h = (max(ys) - min(ys)) / 2.0
+
+            # Expand by 50%
+            half_w = max(half_w, 10) * 1.5
+            half_h = max(half_h, 10) * 1.5
+
+            x1 = max(0, int(cx - half_w))
+            y1 = max(0, int(cy - half_h))
+            x2 = min(w, int(cx + half_w))
+            y2 = min(h, int(cy + half_h))
+
+            if x2 > x1 and y2 > y1:
+                face_region = out[y1:y2, x1:x2]
+                # Kernel size must be odd
+                kw = max(15, (x2 - x1) // 2 | 1)
+                kh = max(15, (y2 - y1) // 2 | 1)
+                blurred = cv2.GaussianBlur(face_region, (kw, kh), 30)
+                out[y1:y2, x1:x2] = blurred
+
+        return out
+
     def draw_overlay(self, frame: np.ndarray, detections: list[Detection] | None = None) -> np.ndarray:
         """Draw bounding boxes, skeleton lines, and keypoints on frame."""
         dets = detections or self.detections
