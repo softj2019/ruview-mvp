@@ -100,6 +100,38 @@ def iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+class KalmanSmooth:
+    """Simple 1D Kalman filter for presenceCount smoothing.
+
+    State: estimated presenceCount (float).
+    Process noise Q allows gradual change; measurement noise R
+    accounts for noisy CSI-based estimates.
+    """
+
+    def __init__(self, process_noise: float = 0.5, measurement_noise: float = 2.0):
+        self.x = 0.0          # state estimate
+        self.p = 1.0          # estimate uncertainty
+        self.q = process_noise
+        self.r = measurement_noise
+
+    def predict(self) -> float:
+        """Predict step — increase uncertainty by process noise."""
+        self.p += self.q
+        return self.x
+
+    def update(self, measurement: float) -> float:
+        """Update step — fuse measurement with prediction."""
+        k = self.p / (self.p + self.r)   # Kalman gain
+        self.x = self.x + k * (measurement - self.x)
+        self.p = (1.0 - k) * self.p
+        return self.x
+
+    def smooth(self, measurement: float) -> float:
+        """Single-call predict+update, returns smoothed value."""
+        self.predict()
+        return self.update(measurement)
+
+
 def to_event_payload(event) -> dict[str, Any]:
     return {
         "id": event.id,
@@ -160,6 +192,10 @@ class SignalAdapterRuntime:
         self._empty_room_calibrated = False
         self._empty_room_calibrated_at: str | None = None
         self._empty_room_baselines: dict = {}  # device_id -> presence_score baseline
+        # Kalman filter for presenceCount smoothing (Phase 5-3)
+        self._kalman = KalmanSmooth(process_noise=0.5, measurement_noise=2.0)
+        # Camera detection timestamp for time-based fusion staleness check
+        self._camera_detection_ts: float = 0.0  # monotonic seconds
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -277,10 +313,19 @@ class SignalAdapterRuntime:
             if csi_persons > csi_person_max:
                 csi_person_max = csi_persons
 
+        # Time-based camera fusion: only use camera if detection is fresh (< 2s)
+        camera_age = _time.monotonic() - self._camera_detection_ts
+        if camera_age > 2.0:
+            camera = 0  # stale camera data — use CSI-only
+
         total = max(camera, fused, nodes_with_presence, nodes_breathing, csi_person_max)
 
         # --- Per-zone presence counts ---
         self._recompute_zone_presence()
+
+        # Kalman-smooth the final presenceCount (Phase 5-3)
+        smoothed = self._kalman.smooth(float(total))
+        total = max(0, round(smoothed))
 
         return total
 
@@ -832,11 +877,25 @@ async def camera_detections(body: dict):
     person_count = body.get("person_count", 0)
     detections = body.get("detections", [])
 
+    # Record camera detection timestamp for staleness check (Phase 5-3)
+    runtime._camera_detection_ts = _time.monotonic()
+
     # Store camera data for fusion
     runtime.zones[0]["camera_person_count"] = person_count
     runtime.zones[0]["camera_detections"] = detections
 
     # --- Pose fusion: camera + CSI ---
+    # Check if camera data is within 2s of latest CSI data for valid fusion
+    latest_csi_ts = max(
+        (datetime.fromisoformat(d["lastSeen"]).timestamp()
+         for d in runtime.devices.values() if d.get("status") == "online"),
+        default=0.0,
+    )
+    camera_ts = body.get("timestamp", datetime.now(timezone.utc).timestamp())
+    if isinstance(camera_ts, str):
+        camera_ts = datetime.fromisoformat(camera_ts).timestamp()
+    camera_csi_fresh = abs(camera_ts - latest_csi_ts) <= 2.0
+
     pose_updates = []
     for det in detections:
         cam_pose = det.get("pose")
@@ -867,7 +926,11 @@ async def camera_detections(body: dict):
         csi_pose = best_device.get("csi_pose") if best_device else None
         csi_pose_conf = best_device.get("csi_pose_confidence", 0.0) if best_device else 0.0
 
-        fused_pose, fused_conf = _fuse_poses(cam_pose, cam_pose_conf, csi_pose, csi_pose_conf)
+        # Skip fusion if camera-CSI time gap > 2s; use CSI-only
+        if camera_csi_fresh:
+            fused_pose, fused_conf = _fuse_poses(cam_pose, cam_pose_conf, csi_pose, csi_pose_conf)
+        else:
+            fused_pose, fused_conf = (csi_pose or "unknown", round(csi_pose_conf, 3))
 
         # Store fused pose on the matched device
         if best_device is not None:
