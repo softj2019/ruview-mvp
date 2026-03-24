@@ -208,8 +208,8 @@ class MmWaveBridge:
             source = "none"
 
         # Fuse via Kalman
-        fused_hr = self._hr_kalman.fuse(mw_hr, csi_hr) if (mw_hr or csi_hr) else None
-        fused_br = self._br_kalman.fuse(mw_br, csi_br) if (mw_br or csi_br) else None
+        fused_hr = self._hr_kalman.fuse(mw_hr, csi_hr) if (mw_hr is not None or csi_hr is not None) else None
+        fused_br = self._br_kalman.fuse(mw_br, csi_br) if (mw_br is not None or csi_br is not None) else None
 
         return {
             "fused_hr": round(fused_hr, 1) if fused_hr is not None else None,

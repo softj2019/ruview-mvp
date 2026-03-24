@@ -282,8 +282,6 @@ class SignalAdapterRuntime:
         fused = self._fuse_person_count()
 
         # Welford z-score presence detection
-        if not hasattr(self, "_presence_welford"):
-            self._presence_welford = {}
 
         nodes_with_presence = 0
         for dev in self.devices.values():
@@ -542,12 +540,11 @@ class SignalAdapterRuntime:
 
         # --- Fall Detection ML integration (Phase 3-1~3-3) ---
         # Track motion history per device
+        from collections import deque
         did = processed.device_id
         if did not in self._motion_history:
-            self._motion_history[did] = []
+            self._motion_history[did] = deque(maxlen=self._motion_history_max)
         self._motion_history[did].append(processed.motion_index)
-        if len(self._motion_history[did]) > self._motion_history_max:
-            self._motion_history[did] = self._motion_history[did][-self._motion_history_max:]
 
         # Ensure notifier backends are ready
         self._ensure_notifier_backends()
@@ -1080,9 +1077,26 @@ async def camera_detections(body: dict):
     # Record camera detection timestamp for staleness check (Phase 5-3)
     runtime._camera_detection_ts = _time.monotonic()
 
-    # Store camera data for fusion
-    runtime.zones[0]["camera_person_count"] = person_count
-    runtime.zones[0]["camera_detections"] = detections
+    # Store camera data per zone (distribute based on detection floor positions)
+    # Reset all zones first
+    for z in runtime.zones:
+        z["camera_person_count"] = 0
+        z["camera_detections"] = []
+    # Assign each detection to its closest zone
+    for det in detections:
+        fp = det.get("floor_pos", {})
+        if fp:
+            dummy_dev = {"x": fp.get("x", 400), "y": fp.get("y", 200)}
+            zone_id = assign_device_zone(dummy_dev, runtime.zones)
+            for z in runtime.zones:
+                if z["id"] == zone_id:
+                    z["camera_person_count"] = z.get("camera_person_count", 0) + 1
+                    z.setdefault("camera_detections", []).append(det)
+                    break
+        else:
+            # No floor position — assign to first zone as fallback
+            runtime.zones[0]["camera_person_count"] = runtime.zones[0].get("camera_person_count", 0) + 1
+            runtime.zones[0].setdefault("camera_detections", []).append(det)
 
     # --- Pose fusion: camera + CSI ---
     # Check if camera data is within 2s of latest CSI data for valid fusion
