@@ -7,6 +7,7 @@ import SensingPage from './pages/SensingPage';
 import SettingsPage from './pages/SettingsPage';
 import PoseFusionPage from './pages/PoseFusionPage';
 import HardwarePage from './pages/HardwarePage';
+import LiveDemoPage from './pages/LiveDemoPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore, type Device } from '@/stores/deviceStore';
@@ -104,6 +105,7 @@ export default function App() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/pose-fusion" element={<PoseFusionPage />} />
           <Route path="/hardware" element={<HardwarePage />} />
+          <Route path="/live-demo" element={<LiveDemoPage />} />
         </Route>
       </Routes>
     </DataProvider>

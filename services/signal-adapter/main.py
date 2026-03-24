@@ -21,6 +21,7 @@ try:
     from .supabase_client import get_supabase
     from .fall_detector import FallDetector, extract_features as extract_fall_features
     from .notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
+    from .mmwave_bridge import MmWaveBridge
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
@@ -28,6 +29,7 @@ except ImportError:
     from supabase_client import get_supabase
     from fall_detector import FallDetector, extract_features as extract_fall_features
     from notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
+    from mmwave_bridge import MmWaveBridge
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -217,6 +219,11 @@ class SignalAdapterRuntime:
         self._notifier_backends_ready = False
         # Track previous device status for online/offline transitions
         self._prev_device_status: dict[str, str] = {}
+        # Fall cross-validation: camera+CSI (Phase 3-4)
+        self._fall_cross_validation_history: list[dict[str, Any]] = []
+        self._camera_fall_candidates: dict[str, bool] = {}  # detection_id -> True
+        # mmWave integration framework (Phase 5-5)
+        self.mmwave_bridge: MmWaveBridge | None = None
 
     def _ensure_notifier_backends(self) -> None:
         """Lazily add WebSocket and Webhook backends once broadcast is available."""
@@ -914,9 +921,26 @@ async def lifespan(app: FastAPI):
         await runtime.bridge.start()
         print(f"[signal-adapter] Bridge connected to {bridge_url}")
 
+    # mmWave bridge (Phase 5-5): start if RUVIEW_MMWAVE_PORT is set
+    mmwave_port = os.getenv("RUVIEW_MMWAVE_PORT")
+    mmwave_task = None
+    if mmwave_port:
+        runtime.mmwave_bridge = MmWaveBridge(
+            udp_port=int(mmwave_port),
+            udp_host=os.getenv("RUVIEW_MMWAVE_HOST", "0.0.0.0"),
+        )
+        mmwave_task = asyncio.create_task(runtime.mmwave_bridge.start_listener(loop))
+        print(f"[signal-adapter] mmWave bridge started on UDP port {mmwave_port}")
+    else:
+        print("[signal-adapter] mmWave bridge disabled (RUVIEW_MMWAVE_PORT not set)")
+
     print(f"[signal-adapter] Starting up on UDP {UDP_HOST}:{UDP_PORT}...")
     yield
     print("[signal-adapter] Shutting down...")
+    if runtime.mmwave_bridge:
+        runtime.mmwave_bridge.stop()
+    if mmwave_task:
+        mmwave_task.cancel()
     if runtime.bridge:
         runtime.bridge.stop()
     offline_task.cancel()
@@ -1078,6 +1102,12 @@ async def camera_detections(body: dict):
         cam_pose_conf = det.get("pose_confidence", 0.0)
         cam_keypoints = det.get("keypoints")
 
+        # --- Fall cross-validation: camera side (Phase 3-4) ---
+        camera_fall_candidate = False
+        if cam_pose in ("fallen", "lying"):
+            camera_fall_candidate = True
+            det["camera_fall_candidate"] = True
+
         # Find the closest device for CSI pose lookup
         # Use bbox center to match against device positions
         bbox = det.get("bbox", [0, 0, 0, 0])
@@ -1101,6 +1131,60 @@ async def camera_detections(body: dict):
 
         csi_pose = best_device.get("csi_pose") if best_device else None
         csi_pose_conf = best_device.get("csi_pose_confidence", 0.0) if best_device else 0.0
+
+        # --- Fall cross-validation: CSI side (Phase 3-4) ---
+        # Check if CSI/event_engine also detected fall for this device
+        csi_fall_detected = False
+        if best_device is not None:
+            csi_state = runtime.event_engine._state.get(best_device["id"], "")
+            csi_fall_detected = csi_state == "fall" or csi_pose in ("fallen",)
+
+        # Cross-validate camera + CSI fall detection
+        if camera_fall_candidate or csi_fall_detected:
+            if camera_fall_candidate and csi_fall_detected:
+                # Both agree: high confidence cross-validated fall
+                cross_val_type = "cross_validated_fall"
+                cross_val_confidence = 0.95
+                print(f"[fall-xval] CROSS-VALIDATED fall: camera+CSI agree (device={best_device['id'] if best_device else 'unknown'})")
+            elif camera_fall_candidate and not csi_fall_detected:
+                # Camera only: lower confidence
+                cross_val_type = "camera_only_fall"
+                cross_val_confidence = 0.5
+                print(f"[fall-xval] Camera-only fall detected (CSI does not confirm)")
+            else:
+                # CSI only: moderate confidence
+                cross_val_type = "csi_only_fall"
+                cross_val_confidence = 0.6
+                print(f"[fall-xval] CSI-only fall detected (camera does not confirm)")
+
+            cross_val_record = {
+                "type": cross_val_type,
+                "confidence": cross_val_confidence,
+                "camera_fall": camera_fall_candidate,
+                "csi_fall": csi_fall_detected,
+                "device_id": best_device["id"] if best_device else None,
+                "timestamp": iso_now(),
+                "camera_pose": cam_pose,
+                "csi_pose": csi_pose,
+            }
+            runtime._fall_cross_validation_history.append(cross_val_record)
+            # Keep last 100 cross-validation records
+            if len(runtime._fall_cross_validation_history) > 100:
+                runtime._fall_cross_validation_history = runtime._fall_cross_validation_history[-100:]
+
+            # Store in alert history via notifier
+            runtime._ensure_notifier_backends()
+            await runtime.notifier.notify(
+                cross_val_type,
+                f"Fall {cross_val_type}: confidence={cross_val_confidence:.2f} "
+                f"(camera={camera_fall_candidate}, csi={csi_fall_detected})",
+                "critical" if cross_val_confidence >= 0.9 else "warning",
+                cross_val_record,
+            )
+
+            # Override pose confidence with cross-validated confidence
+            if camera_fall_candidate:
+                cam_pose_conf = cross_val_confidence
 
         # Skip fusion if camera-CSI time gap > 2s; use CSI-only
         if camera_csi_fresh:
@@ -1264,6 +1348,24 @@ async def fall_stats():
 async def alerts_history():
     """Return last 50 alerts."""
     return {"data": runtime.notifier.get_history()}
+
+
+@app.get("/api/fall/cross-validation")
+async def fall_cross_validation_history():
+    """Return fall cross-validation history (camera+CSI)."""
+    return {"data": runtime._fall_cross_validation_history}
+
+
+@app.get("/api/mmwave/status")
+async def mmwave_status():
+    """Return mmWave bridge connection status."""
+    if runtime.mmwave_bridge is None:
+        return {
+            "connected": False,
+            "enabled": False,
+            "message": "mmWave bridge not enabled (set RUVIEW_MMWAVE_PORT to enable)",
+        }
+    return runtime.mmwave_bridge.get_status()
 
 
 @app.post("/api/csi/ingest")

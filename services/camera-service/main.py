@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse, Response
 from camera import CameraCapture
 from detector import Detector
 from calibration import Calibrator
+from multi_camera import CameraManager
 
 # ---- Config ----
 
@@ -50,6 +51,14 @@ _privacy_mode = False
 camera = CameraCapture(device_index=CAMERA_INDEX, fps=CAMERA_FPS)
 detector = Detector()
 calibrator = Calibrator()
+camera_manager = CameraManager()
+
+# Register the default camera with the manager
+camera_manager.add_camera(
+    device_index=CAMERA_INDEX,
+    name="Default Camera",
+    position=(0.0, 0.0, 2.5),  # ceiling mount default
+)
 
 # Detection loop state
 _detect_frame_count = 0
@@ -355,3 +364,60 @@ async def test_calibration(body: dict):
     cy = body.get("cy", 240)
     floor_pos = calibrator.camera_to_floor(cx, cy)
     return {"camera": {"x": cx, "y": cy}, "floor": floor_pos.to_dict()}
+
+
+# ---- Multi-Camera Endpoints (Phase 4-7) ----
+
+@app.get("/cam/cameras")
+async def list_cameras():
+    """List all registered cameras."""
+    return {
+        "cameras": camera_manager.list_cameras(),
+        "count": camera_manager.camera_count,
+    }
+
+
+@app.post("/cam/cameras")
+async def add_camera(body: dict):
+    """Add a camera by device_index.
+
+    Body: { "device_index": int, "name": str (optional), "position": [x,y,z] (optional) }
+    """
+    device_index = body.get("device_index")
+    if device_index is None:
+        return {"error": "device_index is required"}
+
+    device_index = int(device_index)
+    name = body.get("name", f"Camera {device_index}")
+    position = body.get("position", [0.0, 0.0, 2.5])
+    if len(position) != 3:
+        position = [0.0, 0.0, 2.5]
+    position = tuple(float(v) for v in position)
+
+    instance = camera_manager.add_camera(
+        device_index=device_index,
+        name=name,
+        position=position,
+    )
+
+    # Try to start the camera
+    started = instance.start(target_fps=CAMERA_FPS)
+
+    return {
+        "status": "ok" if started else "added_but_not_started",
+        "camera": instance.to_dict(),
+        "message": (
+            f"Camera '{name}' added and started"
+            if started
+            else f"Camera '{name}' added but could not start (device may not be available)"
+        ),
+    }
+
+
+@app.delete("/cam/cameras/{device_index}")
+async def remove_camera(device_index: int):
+    """Remove a camera by device_index."""
+    removed = camera_manager.remove_camera(device_index)
+    if not removed:
+        return {"error": f"Camera with device_index={device_index} not found"}
+    return {"status": "ok", "message": f"Camera {device_index} removed"}

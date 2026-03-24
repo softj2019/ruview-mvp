@@ -50,6 +50,7 @@ class ProcessedCSI:
     hrv: dict | None = None
     gesture: str | None = None
     gesture_confidence: float = 0.0
+    through_wall: bool = False
 
 
 class WelfordStats:
@@ -268,6 +269,13 @@ class CSIProcessor:
         # --- Step 9: Gesture recognition via DTW (Additional B) ---
         gesture, gesture_confidence = self._detect_gesture(device_id, motion_index)
 
+        # --- Step 10: Through-wall detection (Additional E) ---
+        through_wall = self._estimate_wall_attenuation(
+            rssi=raw.get("rssi", -100.0),
+            presence_score=presence_score,
+            motion_index=motion_index,
+        )
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -292,6 +300,7 @@ class CSIProcessor:
             hrv=hrv,
             gesture=gesture,
             gesture_confidence=gesture_confidence,
+            through_wall=through_wall,
         )
 
     # ------------------------------------------------------------------
@@ -548,6 +557,72 @@ class CSIProcessor:
             return (best_gesture, round(confidence, 3))
 
         return (None, 0.0)
+
+    # ------------------------------------------------------------------
+    # Through-wall detection heuristic (Additional E)
+    # ------------------------------------------------------------------
+
+    # Through-wall detection thresholds
+    THROUGH_WALL_RSSI_THRESHOLD = -80.0       # dBm — weak signal suggests wall
+    THROUGH_WALL_ATTENUATION_DB = 10.0        # dB — RSSI difference indicating wall
+    THROUGH_WALL_DISTANCE_THRESHOLD = 3.0     # meters — far distance with weak RSSI
+
+    def _estimate_wall_attenuation(
+        self,
+        rssi: float,
+        presence_score: float,
+        motion_index: float,
+    ) -> bool:
+        """Estimate whether detection is through a wall.
+
+        Through-wall detection heuristic (Additional E):
+        - Based on RSSI difference between nodes on opposite sides of a wall.
+        - If attenuation > 10dB, flag as "through_wall" detection.
+        - Simple heuristic: if presence detected but RSSI < -80 and
+          the signal characteristics suggest a distant target, mark as through_wall.
+
+        A more accurate implementation would compare RSSI between paired
+        nodes on opposite sides of a known wall. This heuristic approximates
+        that by detecting the signature of wall-attenuated signals:
+        low RSSI + presence detected + low motion (wall dampens motion energy).
+
+        Args:
+            rssi: Received signal strength in dBm.
+            presence_score: CSI-derived presence score.
+            motion_index: CSI-derived motion index.
+
+        Returns:
+            True if detection appears to be through a wall.
+        """
+        # No presence = no through-wall concern
+        if presence_score <= 0.1:
+            return False
+
+        # Core heuristic: presence detected but RSSI is very weak
+        # and motion is dampened (wall attenuates high-frequency motion)
+        if rssi < self.THROUGH_WALL_RSSI_THRESHOLD:
+            # Estimate effective "distance" from RSSI using free-space path loss
+            # FSPL(dB) = 20*log10(d) + 20*log10(f) + 20*log10(4*pi/c)
+            # At 5.8 GHz, FSPL at 1m ~ -47.4 dBm (with 0 dBm TX power)
+            # So d_est ~ 10^((|RSSI| - 47.4) / 20)
+            fspl_1m = 47.4  # dB at 5.8 GHz, 1 meter
+            path_loss = abs(rssi) - fspl_1m
+            if path_loss > 0:
+                estimated_distance = 10.0 ** (path_loss / 20.0)
+            else:
+                estimated_distance = 1.0
+
+            # Through-wall: weak RSSI + presence + estimated distance > 3m
+            if estimated_distance > self.THROUGH_WALL_DISTANCE_THRESHOLD:
+                return True
+
+            # Alternative: very weak RSSI with dampened motion (wall absorbs)
+            # Normal in-room motion_index > 0.5 for a present person,
+            # through-wall typically < 0.3 due to wall attenuation
+            if rssi < -85.0 and presence_score > 0.3 and motion_index < 0.3:
+                return True
+
+        return False
 
     # ------------------------------------------------------------------
     # SOTA algorithms ported from ruvnet/RuView Rust crates
