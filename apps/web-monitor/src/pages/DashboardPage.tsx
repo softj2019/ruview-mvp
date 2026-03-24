@@ -1,4 +1,5 @@
 import KpiCards from '@/components/charts/KpiCards';
+import SystemStatus from '@/components/status/SystemStatus';
 import FloorView from '@/components/floor/FloorView';
 import CameraFeed from '@/components/camera/CameraFeed';
 import ObservatoryMini from '@/components/observatory/ObservatoryMini';
@@ -14,6 +15,7 @@ export default function DashboardPage() {
         <p className="text-sm text-gray-500 mt-0.5">실시간 센싱 모니터링</p>
       </div>
       <KpiCards />
+      <SystemStatus />
       <div className="grid grid-cols-12 gap-6">
         <div className="col-span-12 lg:col-span-5">
           <FloorView />

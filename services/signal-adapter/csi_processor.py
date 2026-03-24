@@ -43,6 +43,8 @@ class ProcessedCSI:
     estimated_persons: int = 0
     per_person_breathing: list[float] | None = None
     doppler_velocity: float | None = None
+    velocity_profile: list[float] | None = None
+    max_velocity: float | None = None
     csi_pose: str | None = None
     csi_pose_confidence: float = 0.0
 
@@ -231,6 +233,13 @@ class CSIProcessor:
             phase_arr_doppler = np.array(list(history))
             _spectrogram, doppler_velocity = self._compute_spectrogram(phase_arr_doppler)
 
+        # --- Step 6b: Body Velocity Profile (BVP) — Widar 3.0 concept ---
+        velocity_profile = None
+        max_velocity = None
+        if history and len(history) >= self.MIN_FRAMES_VITALS:
+            phase_arr_bvp = np.array(list(history))
+            velocity_profile, max_velocity = self._compute_bvp(phase_arr_bvp)
+
         # Multi-person separation via subcarrier correlation clustering
         estimated_persons, per_person_breathing = self._estimate_persons(device_id)
 
@@ -256,6 +265,8 @@ class CSIProcessor:
             estimated_persons=estimated_persons,
             per_person_breathing=per_person_breathing,
             doppler_velocity=doppler_velocity,
+            velocity_profile=velocity_profile,
+            max_velocity=max_velocity,
             csi_pose=csi_pose,
             csi_pose_confidence=csi_pose_confidence,
         )
@@ -595,6 +606,80 @@ class CSIProcessor:
         doppler_velocity = dominant_freq * wavelength / 2.0
 
         return spectrogram, round(doppler_velocity, 4)
+
+    def _compute_bvp(self, phase_history: np.ndarray) -> tuple[list[float] | None, float | None]:
+        """Compute Body Velocity Profile (BVP) — ported from Widar 3.0 concept.
+
+        Uses the STFT spectrogram of the phase history to build a velocity-time
+        matrix.  For each time window the dominant Doppler frequency is converted
+        to a radial velocity using:
+            velocity = freq * wavelength / 2
+        where wavelength = c / 5.8 GHz ~ 0.0517 m.
+
+        Args:
+            phase_history: 1-D array of unwrapped phase values (up to 256
+                           samples at SAMPLE_RATE Hz).
+
+        Returns:
+            (velocity_profile, max_velocity) where velocity_profile is a list
+            of dominant velocities (m/s) at each STFT time step, and
+            max_velocity is the peak value across the profile.  Returns
+            (None, None) when the input is too short.
+        """
+        n = len(phase_history)
+        if n < 32:
+            return None, None
+
+        # Step 1: Compute STFT spectrogram (reuse same windowing as _compute_spectrogram)
+        nperseg = min(64, n)
+        noverlap = nperseg * 3 // 4
+
+        try:
+            freqs, times, zxx = scipy_signal.stft(
+                phase_history,
+                fs=self.SAMPLE_RATE,
+                window="hann",
+                nperseg=nperseg,
+                noverlap=noverlap,
+            )
+        except Exception:
+            return None, None
+
+        spectrogram = np.abs(zxx)  # shape: (n_freqs, n_time_bins)
+        wavelength = self.SPEED_OF_LIGHT / self.DEFAULT_FREQUENCY  # ~0.0517 m
+
+        # Step 2-3: Build velocity-time matrix and detect dominant velocity
+        # Map each frequency bin to a velocity: v = f * lambda / 2
+        velocities = freqs * wavelength / 2.0  # velocity per frequency bin
+
+        # Only consider positive frequencies in the motion band (> 0.1 Hz)
+        motion_mask = freqs > 0.1
+        if not np.any(motion_mask):
+            return None, None
+
+        motion_spectrogram = spectrogram[motion_mask, :]
+        motion_velocities = velocities[motion_mask]
+
+        # Step 4: For each time step, find the dominant velocity
+        n_time_bins = motion_spectrogram.shape[1]
+        velocity_profile: list[float] = []
+        for t_idx in range(n_time_bins):
+            col = motion_spectrogram[:, t_idx]
+            peak_idx = int(np.argmax(col))
+            peak_power = col[peak_idx]
+            mean_power = float(np.mean(col))
+
+            if mean_power > 0 and peak_power > mean_power * 1.5:
+                # Significant peak — record its velocity
+                velocity_profile.append(round(float(motion_velocities[peak_idx]), 4))
+            else:
+                # No clear dominant motion — velocity ~ 0
+                velocity_profile.append(0.0)
+
+        # Step 5: Max velocity across the profile
+        max_velocity = round(float(max(velocity_profile)), 4) if velocity_profile else None
+
+        return velocity_profile, max_velocity
 
     def _unwrap_phase(self, device_id: str, phase_raw: np.ndarray) -> np.ndarray:
         """Phase unwrapping — remove 2π discontinuities.

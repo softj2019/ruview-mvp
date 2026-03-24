@@ -695,10 +695,14 @@ class Observatory {
 
   _connectWS(url) {
     this._disconnectWS();
+    this._wsEverConnected = false;
+    this._wsReconnectAttempts = this._wsReconnectAttempts || 0;
     try {
       this._ws = new WebSocket(url);
       this._ws.onopen = () => {
         console.log('[Observatory] WebSocket connected');
+        this._wsEverConnected = true;
+        this._wsReconnectAttempts = 0;
         this._hud.updateSourceBadge('ws', this._ws);
       };
       this._ws.onmessage = (evt) => {
@@ -709,18 +713,39 @@ class Observatory {
       this._ws.onclose = () => {
         this._ws = null;
         // Don't fall back to demo if auto-detect is still running
-        if (!this._autoDetecting) {
-          console.log('[Observatory] WebSocket closed, falling back to demo');
-          this.settings.dataSource = 'demo';
-          this._resetLiveState();
-          this._hud.updateSourceBadge('demo', null);
+        if (this._autoDetecting) return;
+
+        // If we had a successful connection, attempt reconnect instead of demo fallback
+        if (this._wsEverConnected && this._wsReconnectAttempts < 5) {
+          this._wsReconnectAttempts++;
+          console.log(`[Observatory] WebSocket closed, reconnecting (attempt ${this._wsReconnectAttempts}/5) in 3s...`);
+          this._wsReconnectTimer = setTimeout(() => {
+            this._connectWS(url);
+          }, 3000);
+          return;
         }
+
+        // Exhausted retries or never connected — fall back to demo
+        if (this._wsReconnectAttempts >= 5) {
+          console.log('[Observatory] WebSocket reconnect failed after 5 attempts, falling back to demo');
+        } else {
+          console.log('[Observatory] WebSocket closed, falling back to demo');
+        }
+        this._wsReconnectAttempts = 0;
+        this.settings.dataSource = 'demo';
+        this._resetLiveState();
+        this._hud.updateSourceBadge('demo', null);
       };
       this._ws.onerror = () => {};
     } catch {}
   }
 
   _disconnectWS() {
+    if (this._wsReconnectTimer) {
+      clearTimeout(this._wsReconnectTimer);
+      this._wsReconnectTimer = null;
+    }
+    this._wsReconnectAttempts = 0;
     if (this._ws) { this._ws.close(); this._ws = null; }
     this._resetLiveState();
   }

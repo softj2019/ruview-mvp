@@ -548,6 +548,11 @@ class SignalAdapterRuntime:
             device["csi_estimated_persons"] = processed.estimated_persons
             device["csi_per_person_breathing"] = processed.per_person_breathing
 
+        # Body Velocity Profile (BVP)
+        if processed.velocity_profile is not None:
+            device["velocity_profile"] = processed.velocity_profile
+            device["max_velocity"] = processed.max_velocity
+
         # CSI pose classification
         device["csi_pose"] = processed.csi_pose or "unknown"
         device["csi_pose_confidence"] = processed.csi_pose_confidence
