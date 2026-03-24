@@ -1,14 +1,16 @@
 [package]
-name = "ruview-server"
+name = "ruview-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["cdylib"]
+
 [dependencies]
 ruview-core = { path = "../ruview-core" }
 ruview-signal = { path = "../ruview-signal" }
-axum = { version = "0.7", features = ["ws"] }
-tokio = { version = "1", features = ["full"] }
+wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-dashmap = "6"
+serde-wasm-bindgen = "0.6"

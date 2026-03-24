@@ -1,5 +1,5 @@
 [workspace]
-members = ["ruview-core", "ruview-signal", "ruview-server"]
+members = ["ruview-core", "ruview-signal", "ruview-server", "ruview-wasm"]
 resolver = "2"
 
 [workspace.package]
