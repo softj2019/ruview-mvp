@@ -5,7 +5,7 @@ import os
 import struct
 import time as _time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any
 
 import numpy as np
@@ -156,6 +156,10 @@ class SignalAdapterRuntime:
         self._motion_baseline: dict = {}
         self._motion_baseline_samples: dict = {}
         self._baseline_ready = False
+        # Learning Report state
+        self._empty_room_calibrated = False
+        self._empty_room_calibrated_at: str | None = None
+        self._empty_room_baselines: dict = {}  # device_id -> presence_score baseline
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -296,7 +300,11 @@ class SignalAdapterRuntime:
             elif dev.get("_presence_z", 0) > 0:
                 zone_counts[zone_id] += 1
             elif dev.get("csi_breathing_bpm") and 8 <= dev["csi_breathing_bpm"] <= 25:
-                zone_counts[zone_id] += 1
+                # Only count breathing if Welford is calibrated — prevents false positives
+                # during the empty-room baseline learning phase (< 60 samples)
+                did = dev["id"]
+                if self._presence_welford.get(did, {}).get("calibrated"):
+                    zone_counts[zone_id] += 1
 
         for z in self.zones:
             if not z.get("_manual_override"):
@@ -359,6 +367,60 @@ class SignalAdapterRuntime:
 
     async def broadcast_zones(self) -> None:
         await self.broadcast("zone_update", {"zones": self.zones})
+
+    def calibrate_empty_room(self) -> dict:
+        """Snapshot current CSI presence_score as empty-room baseline per device."""
+        now = iso_now()
+        baselines = {}
+        for dev in self.devices.values():
+            if dev.get("status") == "online":
+                baselines[dev["id"]] = dev.get("presence_score", 0.0)
+                # Reset Welford tracker so it relearns from this empty state
+                if dev["id"] in self._presence_welford:
+                    self._presence_welford[dev["id"]] = {
+                        "stats": WelfordStats(),
+                        "calibrated": False,
+                        "threshold": 0.0,
+                    }
+        self._empty_room_baselines = baselines
+        self._empty_room_calibrated = True
+        self._empty_room_calibrated_at = now
+        return {"calibrated_at": now, "nodes": len(baselines)}
+
+    def build_learning_report(self) -> dict:
+        """Build Learning Report snapshot."""
+        total_presence = sum(z["presenceCount"] for z in self.zones)
+        online_count = sum(1 for d in self.devices.values() if d.get("status") == "online")
+
+        zone_details = []
+        for z in self.zones:
+            count = z["presenceCount"]
+            note = "빈 방 정상" if count == 0 and self._empty_room_calibrated else None
+            zone_details.append({
+                "name": z["name"],
+                "presenceCount": count,
+                "note": note,
+            })
+
+        summary_parts = [
+            "빈 방 캘리브레이션 완료." if self._empty_room_calibrated else "캘리브레이션 미완료.",
+            "모니터링 시작.",
+            f"presenceCount: {total_presence}, {online_count}대 온라인,",
+        ]
+        for zd in zone_details:
+            if zd["note"]:
+                summary_parts.append(f"{zd['name']}: {zd['presenceCount']}명 ({zd['note']}).")
+
+        return {
+            "title": "RuView Learning Report",
+            "timestamp": iso_now(),
+            "calibrated": self._empty_room_calibrated,
+            "calibrated_at": self._empty_room_calibrated_at,
+            "presenceCount": total_presence,
+            "onlineDevices": online_count,
+            "zones": zone_details,
+            "summary": " ".join(summary_parts),
+        }
 
     async def handle_processed(self, processed: ProcessedCSI) -> None:
         events = self.event_engine.evaluate(processed)
@@ -530,6 +592,70 @@ class SignalAdapterRuntime:
             }
             await self.broadcast("event", event_payload)
 
+    def generate_learning_report(self) -> dict:
+        """Generate hourly learning report — calibration status + presence summary."""
+        KST = timezone(timedelta(hours=9))
+        now_kst = datetime.now(KST)
+
+        online_devices = [d for d in self.devices.values() if d.get("status") == "online"]
+
+        # Welford calibration status per device
+        calibration = {}
+        all_calibrated = True
+        for did, tracker in self._presence_welford.items():
+            stats = tracker["stats"]
+            calibrated = tracker["calibrated"]
+            if not calibrated:
+                all_calibrated = False
+            calibration[did] = {
+                "calibrated": calibrated,
+                "samples": stats.count,
+                "samples_needed": 60,
+                "mean": round(stats.mean, 4),
+                "std": round(stats.std(), 4),
+            }
+
+        # Per-zone summary
+        zones_summary = [
+            {
+                "zone_id": z["id"],
+                "name": z["name"],
+                "presenceCount": z.get("presenceCount", 0),
+            }
+            for z in self.zones
+        ]
+
+        # Determine report number from existing files
+        log_dir = os.path.join(os.path.dirname(__file__), "logs")
+        os.makedirs(log_dir, exist_ok=True)
+        existing = [f for f in os.listdir(log_dir) if f.startswith("learning_report_")]
+        report_num = len(existing) + 1
+
+        total_presence = sum(z.get("presenceCount", 0) for z in self.zones)
+
+        report = {
+            "report": f"Learning Report #{report_num}",
+            "timestamp_kst": now_kst.strftime("%Y-%m-%d %H:%M KST"),
+            "online_devices": len(online_devices),
+            "presence_count": total_presence,
+            "calibration_complete": all_calibrated,
+            "calibration": calibration,
+            "zones": zones_summary,
+        }
+
+        # Save to logs/
+        log_file = os.path.join(log_dir, f"learning_report_{now_kst.strftime('%Y%m%d_%H%M')}.json")
+        with open(log_file, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+
+        print(
+            f"[learning-report] #{report_num} | "
+            f"presenceCount: {total_presence} | "
+            f"{len(online_devices)}대 온라인 | "
+            f"캘리브레이션: {'완료' if all_calibrated else '진행 중'}"
+        )
+        return report
+
     async def route_datagram(self, data: bytes, addr: tuple[str, int]) -> None:
         if len(data) < 4:
             return
@@ -573,6 +699,15 @@ async def _offline_check_loop():
         await runtime.check_offline_devices()
 
 
+async def _hourly_report_loop():
+    """Generate hourly learning reports, save to logs/, and broadcast to WS clients."""
+    while True:
+        await asyncio.sleep(3600)
+        report = runtime.generate_learning_report()
+        await runtime.broadcast("learning_report", report)
+        print(f"[signal-adapter] [Learning Report] {report.get('summary', report.get('report'))}")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
@@ -582,6 +717,7 @@ async def lifespan(app: FastAPI):
     )
     runtime.transport = transport
     offline_task = asyncio.create_task(_offline_check_loop())
+    hourly_report_task = asyncio.create_task(_hourly_report_loop())
 
     # Cloudflare bridge (outbound relay for external access)
     bridge_url = os.getenv("RUVIEW_BRIDGE_URL")
@@ -615,6 +751,7 @@ async def lifespan(app: FastAPI):
     if runtime.bridge:
         runtime.bridge.stop()
     offline_task.cancel()
+    hourly_report_task.cancel()
     if runtime.transport is not None:
         runtime.transport.close()
 
@@ -824,6 +961,20 @@ async def websocket_events(websocket: WebSocket):
             await websocket.receive_text()
     except (WebSocketDisconnect, Exception):
         runtime.manager.disconnect(websocket)
+
+
+@app.post("/api/calibration/empty-room")
+async def calibrate_empty_room():
+    """Snapshot current state as empty-room baseline and reset Welford trackers."""
+    result = runtime.calibrate_empty_room()
+    await runtime.broadcast("learning_report", runtime.build_learning_report())
+    return {"status": "ok", **result}
+
+
+@app.get("/api/learning-report")
+async def get_learning_report():
+    """Return current Learning Report snapshot (saves to logs/)."""
+    return runtime.generate_learning_report()
 
 
 @app.post("/api/csi/ingest")
