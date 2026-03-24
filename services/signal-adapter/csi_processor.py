@@ -47,6 +47,7 @@ class ProcessedCSI:
     max_velocity: float | None = None
     csi_pose: str | None = None
     csi_pose_confidence: float = 0.0
+    hrv: dict | None = None
 
 
 class WelfordStats:
@@ -106,6 +107,10 @@ class CSIProcessor:
     FRESNEL_MIN_DISPLACEMENT = 0.003    # Min breathing displacement (m)
     FRESNEL_MAX_DISPLACEMENT = 0.015    # Max breathing displacement (m)
 
+    # HRV computation interval (compute every N frames)
+    HRV_INTERVAL_FRAMES = 20  # ~1 second at 20 Hz
+    HRV_HR_HISTORY_SIZE = 60  # last 60 HR values
+
     def __init__(self):
         # Per-device state
         self._amplitude_buffer: dict[str, deque] = {}
@@ -116,6 +121,10 @@ class CSIProcessor:
         self._frame_count: dict[str, int] = {}
         # Per-subcarrier phase histories for multi-person separation
         self._per_sc_phase: dict[str, dict[int, deque]] = {}
+        # Per-device heart rate history for HRV (last 60 values)
+        self._hr_history: dict[str, deque] = {}
+        # Cached HRV result per device
+        self._last_hrv: dict[str, dict | None] = {}
 
         # Butterworth filter coefficients (computed once)
         self._breath_sos = scipy_signal.butter(
@@ -248,6 +257,9 @@ class CSIProcessor:
             motion_index, breathing_rate, doppler_velocity
         )
 
+        # --- Step 8: HRV analysis (Phase Additional C) ---
+        hrv = self._update_hrv(device_id, heart_rate)
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -269,7 +281,134 @@ class CSIProcessor:
             max_velocity=max_velocity,
             csi_pose=csi_pose,
             csi_pose_confidence=csi_pose_confidence,
+            hrv=hrv,
         )
+
+    # ------------------------------------------------------------------
+    # HRV analysis (Phase Additional C)
+    # ------------------------------------------------------------------
+
+    def _update_hrv(self, device_id: str, heart_rate: float | None) -> dict | None:
+        """Track heart rate and periodically compute HRV.
+
+        Stores last 60 HR values per device. Recomputes HRV every
+        HRV_INTERVAL_FRAMES frames.
+
+        Returns:
+            HRV dict or cached result, None if insufficient data.
+        """
+        if heart_rate is not None and 40.0 <= heart_rate <= 180.0:
+            if device_id not in self._hr_history:
+                self._hr_history[device_id] = deque(maxlen=self.HRV_HR_HISTORY_SIZE)
+            self._hr_history[device_id].append(heart_rate)
+
+        frame_count = self._frame_count.get(device_id, 0)
+
+        # Compute HRV periodically
+        if frame_count % self.HRV_INTERVAL_FRAMES == 0:
+            hr_hist = self._hr_history.get(device_id)
+            if hr_hist and len(hr_hist) >= 10:
+                hrv = self._compute_hrv(list(hr_hist))
+                self._last_hrv[device_id] = hrv
+                return hrv
+
+        # Return cached result between computations
+        return self._last_hrv.get(device_id)
+
+    @staticmethod
+    def _compute_hrv(heart_rate_history: list[float]) -> dict | None:
+        """Compute HRV metrics from heart rate history.
+
+        Args:
+            heart_rate_history: List of HR values (BPM), at least 10 values.
+
+        Returns:
+            Dict with SDNN, RMSSD, PNN50, LF/HF ratio, stress level.
+            None if insufficient valid data.
+        """
+        hr_arr = np.array(heart_rate_history, dtype=np.float64)
+
+        # Filter out invalid values
+        valid = hr_arr[(hr_arr >= 40) & (hr_arr <= 180)]
+        if len(valid) < 10:
+            return None
+
+        # Convert HR (BPM) to R-R intervals (ms): rr = 60000 / hr
+        rr = 60000.0 / valid
+
+        # --- SDNN: standard deviation of R-R intervals ---
+        sdnn = float(np.std(rr, ddof=1))
+
+        # --- RMSSD: root mean square of successive differences ---
+        rr_diff = np.diff(rr)
+        rmssd = float(np.sqrt(np.mean(rr_diff ** 2)))
+
+        # --- PNN50: percentage of successive differences > 50ms ---
+        nn50 = int(np.sum(np.abs(rr_diff) > 50.0))
+        pnn50 = (nn50 / len(rr_diff)) * 100.0 if len(rr_diff) > 0 else 0.0
+
+        # --- LF/HF ratio via FFT ---
+        # Interpolate R-R intervals to uniform 4 Hz sampling for spectral analysis
+        n = len(rr)
+        # Cumulative time axis from R-R intervals (seconds)
+        t_rr = np.cumsum(rr) / 1000.0  # ms -> s
+        t_rr = t_rr - t_rr[0]  # start at 0
+
+        lf_hf_ratio = None
+        if n >= 16 and t_rr[-1] > 0:
+            # Interpolate to uniform 4 Hz
+            fs_interp = 4.0
+            t_uniform = np.arange(0, t_rr[-1], 1.0 / fs_interp)
+            if len(t_uniform) >= 16:
+                rr_interp = np.interp(t_uniform, t_rr, rr)
+                # Remove mean (detrend)
+                rr_interp = rr_interp - np.mean(rr_interp)
+
+                # FFT
+                n_fft = len(rr_interp)
+                fft_vals = np.fft.rfft(rr_interp)
+                psd = (np.abs(fft_vals) ** 2) / n_fft
+                freqs = np.fft.rfftfreq(n_fft, d=1.0 / fs_interp)
+
+                # LF band: 0.04-0.15 Hz
+                lf_mask = (freqs >= 0.04) & (freqs <= 0.15)
+                lf_power = float(np.sum(psd[lf_mask])) if np.any(lf_mask) else 0.0
+
+                # HF band: 0.15-0.4 Hz
+                hf_mask = (freqs > 0.15) & (freqs <= 0.4)
+                hf_power = float(np.sum(psd[hf_mask])) if np.any(hf_mask) else 0.0
+
+                if hf_power > 1e-10:
+                    lf_hf_ratio = round(lf_power / hf_power, 3)
+
+        # --- Stress level ---
+        if lf_hf_ratio is not None:
+            if lf_hf_ratio < 1.5:
+                stress_level = "low"
+            elif lf_hf_ratio < 2.5:
+                stress_level = "moderate"
+            else:
+                stress_level = "high"
+        else:
+            # Fallback: use RMSSD-based stress estimate
+            # High RMSSD (>40ms) = relaxed, Low RMSSD (<20ms) = stressed
+            if rmssd > 40:
+                stress_level = "low"
+            elif rmssd > 20:
+                stress_level = "moderate"
+            else:
+                stress_level = "high"
+
+        return {
+            "sdnn": round(sdnn, 2),
+            "rmssd": round(rmssd, 2),
+            "pnn50": round(pnn50, 2),
+            "lf_hf_ratio": lf_hf_ratio,
+            "stress_level": stress_level,
+            "n_samples": len(valid),
+            "mean_rr": round(float(np.mean(rr)), 2),
+            "mean_hr": round(float(np.mean(valid)), 1),
+        }
 
     # ------------------------------------------------------------------
     # CSI-based pose classification

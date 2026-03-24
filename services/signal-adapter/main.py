@@ -19,11 +19,13 @@ try:
     from .csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
     from .event_engine import EventEngine
     from .supabase_client import get_supabase
+    from .fall_detector import FallDetector, extract_features as extract_fall_features
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
     from event_engine import EventEngine
     from supabase_client import get_supabase
+    from fall_detector import FallDetector, extract_features as extract_fall_features
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -202,6 +204,10 @@ class SignalAdapterRuntime:
         self._camera_last_person_ts: float = 0.0
         # Active modality for confidence-based switching (Phase 5-4)
         self._active_modality: str = "csi_only"
+        # Fall detection ML framework (Phase 3-1~3-3)
+        self.fall_detector = FallDetector()
+        self._motion_history: dict[str, list[float]] = {}  # device_id -> recent motion values
+        self._motion_history_max = 50  # keep last 50 motion samples per device
 
     def device_key(self, node_id: int) -> str:
         return f"node-{node_id}"
@@ -493,6 +499,32 @@ class SignalAdapterRuntime:
     async def handle_processed(self, processed: ProcessedCSI) -> None:
         events = self.event_engine.evaluate(processed)
 
+        # --- Fall Detection ML integration (Phase 3-1~3-3) ---
+        # Track motion history per device
+        did = processed.device_id
+        if did not in self._motion_history:
+            self._motion_history[did] = []
+        self._motion_history[did].append(processed.motion_index)
+        if len(self._motion_history[did]) > self._motion_history_max:
+            self._motion_history[did] = self._motion_history[did][-self._motion_history_max:]
+
+        # When fall is suspected by event_engine, run ML fall detector
+        fall_events = [e for e in events if e.type == "fall_suspected"]
+        for fe in fall_events:
+            motion_hist = self._motion_history.get(did, [])
+            if len(motion_hist) >= 4:
+                features = extract_fall_features(motion_hist, self.csi_processor.SAMPLE_RATE)
+                is_fall, confidence = self.fall_detector.detect(features)
+                # Update the event confidence with ML result
+                fe.confidence = confidence
+                fe.metadata["ml_fall_detected"] = is_fall
+                fe.metadata["ml_confidence"] = confidence
+                fe.metadata["fall_features"] = features
+                if not is_fall:
+                    # ML says not a fall — downgrade severity
+                    fe.severity = "warning"
+                    fe.type = "fall_suspected_low_confidence"
+
         # Include breathing and heart rate in signal payload for chart
         dev = self.devices.get(processed.device_id, {})
         signal_payload = {
@@ -580,6 +612,10 @@ class SignalAdapterRuntime:
         # CSI pose classification
         device["csi_pose"] = processed.csi_pose or "unknown"
         device["csi_pose_confidence"] = processed.csi_pose_confidence
+
+        # HRV analysis (Phase Additional C)
+        if processed.hrv is not None:
+            device["hrv"] = processed.hrv
 
         # Server-side vitals extraction (supplement firmware vitals)
         if processed.breathing_rate is not None:
@@ -1120,6 +1156,50 @@ async def calibrate_empty_room():
 async def get_learning_report():
     """Return current Learning Report snapshot (saves to logs/)."""
     return runtime.generate_learning_report()
+
+
+@app.post("/api/fall/record")
+async def fall_record(body: dict):
+    """Record a fall/non-fall event for ML training data collection.
+
+    Body: { "features": {...}, "label": true/false }
+    Or: { "device_id": "node-1", "label": true/false }  (auto-extract features from motion history)
+    """
+    label = body.get("label")
+    if label is None:
+        raise HTTPException(status_code=400, detail="'label' (true/false) is required")
+
+    features = body.get("features")
+    if features is None:
+        # Auto-extract from motion history
+        device_id = body.get("device_id")
+        if device_id and device_id in runtime._motion_history:
+            motion_hist = runtime._motion_history[device_id]
+            if len(motion_hist) >= 4:
+                features = extract_fall_features(motion_hist, runtime.csi_processor.SAMPLE_RATE)
+            else:
+                raise HTTPException(status_code=400, detail="Not enough motion history for feature extraction")
+        else:
+            raise HTTPException(status_code=400, detail="Provide 'features' dict or valid 'device_id'")
+
+    runtime.fall_detector.record_event(features, bool(label))
+    return {"status": "ok", "features": features, "label": bool(label)}
+
+
+@app.post("/api/fall/train")
+async def fall_train():
+    """Trigger ML model training from collected fall detection data."""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, runtime.fall_detector.train)
+    return result
+
+
+@app.get("/api/fall/stats")
+async def fall_stats():
+    """Get fall detection training data statistics."""
+    stats = runtime.fall_detector.get_training_stats()
+    return stats
 
 
 @app.post("/api/csi/ingest")
