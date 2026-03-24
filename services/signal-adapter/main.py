@@ -180,6 +180,8 @@ class SignalAdapterRuntime:
         self.zones: list[dict[str, Any]] = [dict(z) for z in DEFAULT_ZONES]
         self.transport = None
         self.bridge: "BridgeClient | None" = None
+        # Prometheus metrics
+        self._csi_frames_total: int = 0
         # Broadcast throttling
         self._last_broadcast_time = 0.0
         self._broadcast_interval = 0.2  # seconds
@@ -519,6 +521,7 @@ class SignalAdapterRuntime:
         if len(data) < 20:
             return
 
+        self._csi_frames_total += 1
         node_id = data[4]
         n_subcarriers = struct.unpack_from("<H", data, 6)[0]
         rssi = struct.unpack_from("<b", data, 16)[0]
@@ -853,6 +856,58 @@ async def health():
         "udp_port": UDP_PORT,
         "devices": len(runtime.devices),
     }
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus-compatible metrics endpoint (text/plain exposition format)."""
+    from fastapi.responses import PlainTextResponse
+
+    lines: list[str] = []
+
+    # ruview_online_devices gauge
+    online = sum(1 for d in runtime.devices.values() if d.get("status") == "online")
+    lines.append("# HELP ruview_online_devices Number of online ESP32 devices")
+    lines.append("# TYPE ruview_online_devices gauge")
+    lines.append(f"ruview_online_devices {online}")
+
+    # ruview_presence_count gauge (per zone)
+    lines.append("# HELP ruview_presence_count Presence count per zone")
+    lines.append("# TYPE ruview_presence_count gauge")
+    for z in runtime.zones:
+        zone_id = z["id"]
+        zone_name = z["name"]
+        count = z.get("presenceCount", 0)
+        lines.append(f'ruview_presence_count{{zone_id="{zone_id}",zone_name="{zone_name}"}} {count}')
+
+    # ruview_csi_frames_total counter
+    lines.append("# HELP ruview_csi_frames_total Total CSI frames received")
+    lines.append("# TYPE ruview_csi_frames_total counter")
+    lines.append(f"ruview_csi_frames_total {runtime._csi_frames_total}")
+
+    # ruview_breathing_bpm gauge (per device)
+    lines.append("# HELP ruview_breathing_bpm Breathing rate in BPM per device")
+    lines.append("# TYPE ruview_breathing_bpm gauge")
+    for dev in runtime.devices.values():
+        did = dev["id"]
+        bpm = dev.get("breathing_bpm", 0) or dev.get("csi_breathing_bpm", 0) or 0
+        lines.append(f'ruview_breathing_bpm{{device="{did}"}} {round(bpm, 1)}')
+
+    # ruview_heart_rate_bpm gauge (per device)
+    lines.append("# HELP ruview_heart_rate_bpm Heart rate in BPM per device")
+    lines.append("# TYPE ruview_heart_rate_bpm gauge")
+    for dev in runtime.devices.values():
+        did = dev["id"]
+        hr = dev.get("heart_rate", 0) or dev.get("csi_heart_rate", 0) or 0
+        lines.append(f'ruview_heart_rate_bpm{{device="{did}"}} {round(hr, 1)}')
+
+    # ruview_active_modality info
+    lines.append("# HELP ruview_active_modality Current active sensing modality")
+    lines.append("# TYPE ruview_active_modality gauge")
+    lines.append(f'ruview_active_modality{{modality="{runtime._active_modality}"}} 1')
+
+    body = "\n".join(lines) + "\n"
+    return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/devices")

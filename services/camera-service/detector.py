@@ -37,6 +37,7 @@ class Detection:
     x2: int
     y2: int
     keypoints: list[list[float]] | None = None
+    track_id: int | None = None
 
     def to_dict(self):
         d = {
@@ -44,12 +45,207 @@ class Detection:
             "confidence": round(self.confidence, 3),
             "bbox": [self.x1, self.y1, self.x2, self.y2],
         }
+        if self.track_id is not None:
+            d["track_id"] = self.track_id
         if self.keypoints is not None:
             d["keypoints"] = self.keypoints
             pose, pose_conf = Detector.classify_pose(self.keypoints)
             d["pose"] = pose
             d["pose_confidence"] = pose_conf
         return d
+
+
+def _compute_iou(box_a: tuple[int, int, int, int], box_b: tuple[int, int, int, int]) -> float:
+    """Compute Intersection over Union between two (x1, y1, x2, y2) boxes."""
+    xa = max(box_a[0], box_b[0])
+    ya = max(box_a[1], box_b[1])
+    xb = min(box_a[2], box_b[2])
+    yb = min(box_a[3], box_b[3])
+    inter = max(0, xb - xa) * max(0, yb - ya)
+    if inter == 0:
+        return 0.0
+    area_a = (box_a[2] - box_a[0]) * (box_a[3] - box_a[1])
+    area_b = (box_b[2] - box_b[0]) * (box_b[3] - box_b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _compute_appearance(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray | None:
+    """Compute HSV color histogram feature vector for a person crop.
+
+    Args:
+        frame: Full BGR frame.
+        bbox: (x1, y1, x2, y2) bounding box.
+
+    Returns:
+        Normalized histogram as 1-D float32 array, or None if crop is invalid.
+    """
+    x1, y1, x2, y2 = bbox
+    h, w = frame.shape[:2]
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(w, x2), min(h, y2)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    crop = frame[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [16, 8], [0, 180, 0, 256])
+    cv2.normalize(hist, hist)
+    return hist.flatten().astype(np.float32)
+
+
+class SimpleTracker:
+    """Lightweight ByteTrack-style multi-object tracker using IoU matching
+    and optional color-histogram re-identification."""
+
+    def __init__(self, iou_threshold: float = 0.3, max_age: int = 10,
+                 reid_threshold: float = 0.6):
+        self._next_id = 1
+        self._iou_threshold = iou_threshold
+        self._max_age = max_age
+        self._reid_threshold = reid_threshold
+        # Active tracks: list of dicts with keys:
+        #   id, bbox (x1,y1,x2,y2), age, hits, last_seen (frames since update),
+        #   appearance (np.ndarray | None)
+        self._tracks: list[dict] = []
+        # Recently lost tracks kept for re-id (up to 30 frames)
+        self._lost_tracks: list[dict] = []
+
+    def update(self, detections: list[Detection],
+               frame: np.ndarray | None = None) -> list[Detection]:
+        """Match detections to existing tracks and assign track_ids.
+
+        Args:
+            detections: Current frame detections (person-only will be tracked).
+            frame: BGR frame for appearance feature extraction (optional).
+
+        Returns:
+            The same detection list with track_id fields populated.
+        """
+        person_dets = [d for d in detections if d.class_name == "person"]
+        non_person_dets = [d for d in detections if d.class_name != "person"]
+
+        # Compute appearance features for current detections
+        det_features: list[np.ndarray | None] = []
+        for d in person_dets:
+            if frame is not None:
+                feat = _compute_appearance(frame, (d.x1, d.y1, d.x2, d.y2))
+            else:
+                feat = None
+            det_features.append(feat)
+
+        # Build IoU cost matrix: tracks x detections
+        matched_det = set()
+        matched_trk = set()
+
+        if self._tracks and person_dets:
+            iou_matrix = np.zeros((len(self._tracks), len(person_dets)), dtype=np.float32)
+            for t_idx, trk in enumerate(self._tracks):
+                for d_idx, det in enumerate(person_dets):
+                    iou_matrix[t_idx, d_idx] = _compute_iou(
+                        trk["bbox"], (det.x1, det.y1, det.x2, det.y2)
+                    )
+
+            # Greedy matching by highest IoU
+            while True:
+                if iou_matrix.size == 0:
+                    break
+                best = np.unravel_index(np.argmax(iou_matrix), iou_matrix.shape)
+                t_idx, d_idx = int(best[0]), int(best[1])
+                if iou_matrix[t_idx, d_idx] < self._iou_threshold:
+                    break
+                # Match found
+                matched_trk.add(t_idx)
+                matched_det.add(d_idx)
+                det = person_dets[d_idx]
+                trk = self._tracks[t_idx]
+                det.track_id = trk["id"]
+                trk["bbox"] = (det.x1, det.y1, det.x2, det.y2)
+                trk["hits"] += 1
+                trk["last_seen"] = 0
+                if det_features[d_idx] is not None:
+                    trk["appearance"] = det_features[d_idx]
+                # Zero out row and column to prevent re-matching
+                iou_matrix[t_idx, :] = 0
+                iou_matrix[:, d_idx] = 0
+
+        # Unmatched detections: try re-id against lost tracks, else new track
+        for d_idx, det in enumerate(person_dets):
+            if d_idx in matched_det:
+                continue
+
+            feat = det_features[d_idx]
+            reid_match = None
+
+            # Attempt re-identification via color histogram
+            if feat is not None and self._lost_tracks:
+                best_corr = -1.0
+                best_lost_idx = -1
+                for l_idx, lost in enumerate(self._lost_tracks):
+                    lost_feat = lost.get("appearance")
+                    if lost_feat is None:
+                        continue
+                    corr = cv2.compareHist(
+                        feat.reshape(-1, 1), lost_feat.reshape(-1, 1),
+                        cv2.HISTCMP_CORREL,
+                    )
+                    if corr > best_corr:
+                        best_corr = corr
+                        best_lost_idx = l_idx
+                if best_corr > self._reid_threshold and best_lost_idx >= 0:
+                    reid_match = self._lost_tracks.pop(best_lost_idx)
+
+            if reid_match is not None:
+                # Re-identified: reuse old track id
+                det.track_id = reid_match["id"]
+                new_track = {
+                    "id": reid_match["id"],
+                    "bbox": (det.x1, det.y1, det.x2, det.y2),
+                    "age": reid_match["age"],
+                    "hits": reid_match["hits"] + 1,
+                    "last_seen": 0,
+                    "appearance": feat,
+                }
+                self._tracks.append(new_track)
+            else:
+                # Brand-new track
+                det.track_id = self._next_id
+                new_track = {
+                    "id": self._next_id,
+                    "bbox": (det.x1, det.y1, det.x2, det.y2),
+                    "age": 0,
+                    "hits": 1,
+                    "last_seen": 0,
+                    "appearance": feat,
+                }
+                self._tracks.append(new_track)
+                self._next_id += 1
+
+        # Unmatched tracks: increment last_seen
+        surviving = []
+        for t_idx, trk in enumerate(self._tracks):
+            if t_idx in matched_trk or trk["last_seen"] == 0:
+                trk["age"] += 1
+                surviving.append(trk)
+            else:
+                trk["last_seen"] += 1
+                if trk["last_seen"] >= self._max_age:
+                    # Move to lost tracks for potential re-id
+                    self._lost_tracks.append(trk)
+                else:
+                    trk["age"] += 1
+                    surviving.append(trk)
+
+        self._tracks = surviving
+
+        # Prune old lost tracks (keep for up to 30 extra frames)
+        self._lost_tracks = [
+            lt for lt in self._lost_tracks if lt["last_seen"] < self._max_age + 30
+        ]
+        for lt in self._lost_tracks:
+            lt["last_seen"] += 1
+
+        # Return all detections (persons now have track_id set)
+        return person_dets + non_person_dets
 
 
 class Detector:
@@ -61,6 +257,7 @@ class Detector:
         self._lock = threading.Lock()
         self._person_count = 0
         self._fps = 0.0
+        self._tracker = SimpleTracker()
 
     def load(self):
         from ultralytics import YOLO
@@ -117,6 +314,9 @@ class Detector:
                 dets.append(Detection(cls_name, conf, x1, y1, x2, y2, kps))
                 if cls_name == "person":
                     persons += 1
+
+        # Multi-object tracking: assign persistent track IDs
+        dets = self._tracker.update(dets, frame)
 
         with self._lock:
             self._detections = dets
