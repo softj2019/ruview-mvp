@@ -8,6 +8,7 @@ interface UseWebSocketOptions {
   onError?: (error: Event) => void;
   reconnectInterval?: number;
   maxReconnectAttempts?: number;
+  heartbeatInterval?: number;
 }
 
 export function useWebSocket({
@@ -18,23 +19,42 @@ export function useWebSocket({
   onError,
   reconnectInterval = 3000,
   maxReconnectAttempts = 10,
+  heartbeatInterval = 30000,
 }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const attemptsRef = useRef(0);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const callbacksRef = useRef({ onMessage, onOpen, onClose, onError });
 
-  // Update callbacks ref without triggering reconnect
   callbacksRef.current = { onMessage, onOpen, onClose, onError };
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatRef.current !== null) {
+      clearInterval(heartbeatRef.current);
+      heartbeatRef.current = null;
+    }
+  }, []);
+
+  const startHeartbeat = useCallback(() => {
+    stopHeartbeat();
+    heartbeatRef.current = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, heartbeatInterval);
+  }, [heartbeatInterval, stopHeartbeat]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
     try {
       const ws = new WebSocket(url);
 
       ws.onopen = () => {
         attemptsRef.current = 0;
+        startHeartbeat();
         callbacksRef.current.onOpen?.();
       };
 
@@ -48,6 +68,7 @@ export function useWebSocket({
       };
 
       ws.onclose = () => {
+        stopHeartbeat();
         callbacksRef.current.onClose?.();
         if (attemptsRef.current < maxReconnectAttempts) {
           const delay = reconnectInterval * Math.pow(2, attemptsRef.current);
@@ -64,20 +85,20 @@ export function useWebSocket({
 
       wsRef.current = ws;
     } catch {
-      // WebSocket construction can fail (e.g., invalid URL)
       console.warn('[WS] Failed to create WebSocket connection');
     }
-  }, [url, reconnectInterval, maxReconnectAttempts]);
+  }, [url, reconnectInterval, maxReconnectAttempts, startHeartbeat, stopHeartbeat]);
 
   useEffect(() => {
     connect();
     return () => {
+      stopHeartbeat();
       if (timerRef.current !== null) {
         clearTimeout(timerRef.current);
       }
       wsRef.current?.close();
     };
-  }, [connect]);
+  }, [connect, stopHeartbeat]);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
