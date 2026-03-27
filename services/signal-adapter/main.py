@@ -728,8 +728,13 @@ class SignalAdapterRuntime:
             device["max_velocity"] = processed.max_velocity
 
         # CSI pose classification
-        device["csi_pose"] = processed.csi_pose or "unknown"
-        device["csi_pose_confidence"] = processed.csi_pose_confidence
+        # GitHub #8: presence 노이즈 수준(<0.15)에서는 포즈 분류 신뢰 불가 — 억제
+        if processed.presence_score < 0.15:
+            device["csi_pose"] = "unknown"
+            device["csi_pose_confidence"] = 0.0
+        else:
+            device["csi_pose"] = processed.csi_pose or "unknown"
+            device["csi_pose_confidence"] = processed.csi_pose_confidence
 
         # HRV analysis (Phase Additional C)
         if processed.hrv is not None:
@@ -789,7 +794,8 @@ class SignalAdapterRuntime:
         device["n_persons"] = n_persons
         device["presence_score"] = presence_score
         device["motion_energy"] = motion_energy
-        device["breathing_bpm"] = breathing_bpm
+        # GitHub #9: 서버측 필터링 — 정상 범위(6~30 BPM) 외 firmware 값은 0으로 마스킹
+        device["breathing_bpm"] = breathing_bpm if 6.0 <= breathing_bpm <= 30.0 else 0.0
         device["heart_rate"] = heart_rate
 
         # Assign device to closest zone
