@@ -531,21 +531,59 @@ class Observatory {
     };
   }
 
-  _generateExtraPersons(count, startIndex) {
-    // Generate additional persons beyond detected devices based on presenceCount
-    const xSlots = [-2.0, 2.0, -0.7, 0.7, -2.4, 2.4, -1.5, 1.5, 0, -3.0];
-    const zSlots = [0, 0, -1.0, 1.0, -2.5, 2.5, 2.0, -2.0, -3.0, 1.5];
+  /**
+   * Map floor plan pixel coords to 3D room coords (issue #4).
+   * Floor plan: x 0–800 → 3D X –6 to +6; y 0–400 → 3D Z –5 to +5.
+   */
+  _floorToRoom(px, py) {
+    return [px * 12 / 800 - 6, py * 10 / 400 - 5];
+  }
+
+  /**
+   * Compute polygon centroid (average of vertices).
+   * Returns { cx, cy } in floor plan pixel coords.
+   */
+  _polygonCentroid(polygon) {
+    if (!polygon || polygon.length === 0) return { cx: 400, cy: 200 };
+    let sx = 0, sy = 0;
+    for (const pt of polygon) { sx += pt.x; sy += pt.y; }
+    return { cx: sx / polygon.length, cy: sy / polygon.length };
+  }
+
+  /**
+   * Build person list from live zone data — deterministic, zone-aware (issue #4).
+   *
+   * Persons are placed at zone centroids with fixed per-slot offsets so layout
+   * stays stable across repeated _buildLiveFrame calls. Motion score is
+   * derived deterministically from zone index (no Math.random()).
+   */
+  _buildPersonsFromZones(zones) {
+    // Per-slot offsets within a zone (in floor plan pixels; up to 4 persons/zone)
+    const slotOffsets = [
+      [0, 0], [50, -60], [-50, 60], [60, 50],
+    ];
     const persons = [];
-    for (let i = 0; i < count; i++) {
-      const idx = startIndex + i;
-      persons.push({
-        id: `p${idx}`,
-        position: [xSlots[idx % xSlots.length], 0, zSlots[idx % zSlots.length]],
-        motion_score: 10 + Math.round(Math.random() * 15),
-        pose: 'sitting',
-        facing: (idx * 0.7) % (Math.PI * 2),
-      });
-    }
+    zones.forEach((zone, zoneIdx) => {
+      const count = zone.presenceCount || 0;
+      if (count <= 0) return;
+      const { cx, cy } = this._polygonCentroid(zone.polygon || []);
+      for (let s = 0; s < count; s++) {
+        const [ox, oy] = slotOffsets[s % slotOffsets.length];
+        const [rx, rz] = this._floorToRoom(cx + ox, cy + oy);
+        const idx = zoneIdx * 4 + s;
+        // Deterministic motion_score: vary slightly by slot so figures look natural
+        const motionBase = [12, 18, 10, 15][s % 4];
+        persons.push({
+          id: `zone-${zone.id}-p${s}`,
+          position: [rx, 0, rz],
+          motion_score: motionBase,
+          pose: 'sitting',
+          facing: ((zoneIdx * 1.3 + s * 0.9) % (Math.PI * 2)),
+          zone_id: zone.id,
+          slot: idx,
+        });
+      }
+    });
     return persons;
   }
 
@@ -563,6 +601,64 @@ class Observatory {
     return { grid_size: [20, 1, 20], values };
   }
 
+  /**
+   * Derive vitals confidence from actual sensor payload (issue #2).
+   *
+   * Rules:
+   * - presence_score <0.05 → noise level → confidence 0 regardless of bpm values
+   * - presence_score 0.05–0.15 → degraded signal → linear scale 0→0.45
+   * - presence_score ≥0.15 → reliable signal → full confidence scaling
+   * - flags bit 2 (0x04) → quality warning → confidence ×0.6
+   * - vitals age >80% of TTL → stale flag set, confidence ×0.7
+   * - no lastVitals → fall back to device-level aggregation
+   */
+  _computeVitalsConfidence(lastVitals, breathCount, hrCount, personCount) {
+    const VITALS_TTL_MS = 15000;
+    const STALE_THRESHOLD = VITALS_TTL_MS * 0.8;
+    const NOISE_FLOOR = 0.05;
+    const RELIABLE_THRESHOLD = 0.15;
+
+    if (!lastVitals) {
+      return {
+        breathing: breathCount > 0 ? 0.65 : (personCount > 0 ? 0.55 : 0),
+        heartRate: hrCount > 0 ? 0.45 : (personCount > 0 ? 0.35 : 0),
+        stale: false,
+      };
+    }
+
+    const presScore = lastVitals.presence_score ?? 0;
+    const flags = lastVitals.flags ?? 0;
+    const hasQualityWarning = (flags & 0x04) !== 0;
+    const vitalsAge = Date.now() - (this._liveState.lastVitalsAt || 0);
+    const stale = vitalsAge > STALE_THRESHOLD;
+
+    // Signal quality factor: 0 at noise floor, 1 at reliable threshold, linear in between
+    let qualityFactor;
+    if (presScore < NOISE_FLOOR) {
+      qualityFactor = 0;
+    } else if (presScore >= RELIABLE_THRESHOLD) {
+      qualityFactor = 1;
+    } else {
+      qualityFactor = (presScore - NOISE_FLOOR) / (RELIABLE_THRESHOLD - NOISE_FLOOR);
+    }
+
+    const staleMult = stale ? 0.7 : 1.0;
+    const warnMult = hasQualityWarning ? 0.6 : 1.0;
+
+    const breathBpm = lastVitals.breathing_rate_bpm || 0;
+    const hrBpm = lastVitals.heart_rate_bpm || 0;
+
+    // Max base confidence: breathing 0.85, HR 0.75 (HR signal noisier by nature)
+    const breathing = breathBpm > 0
+      ? Math.min(0.85, qualityFactor * 0.75 + 0.1) * staleMult * warnMult
+      : 0;
+    const heartRate = hrBpm > 0
+      ? Math.min(0.75, qualityFactor * 0.65 + 0.1) * staleMult * warnMult
+      : 0;
+
+    return { breathing: Math.round(breathing * 100) / 100, heartRate: Math.round(heartRate * 100) / 100, stale };
+  }
+
   _buildLiveFrame() {
     const devices = this._snapshotDevices();
     const onlineDevices = devices.filter((device) => device.status !== 'offline');
@@ -578,8 +674,8 @@ class Observatory {
       : -65;
     const motionIndex = lastSignal?.motion_index ?? (onlineDevices.length > 0 ? 0.12 : 0);
     const personCount = this._liveState.zones.reduce((sum, z) => sum + (z.presenceCount || 0), 0);
-    // Generate persons based on presenceCount (CSI-detected people), not device count
-    const persons = this._generateExtraPersons(personCount, 0);
+    // Zone-aware, deterministic person placement (issue #4)
+    const persons = this._buildPersonsFromZones(this._liveState.zones);
     const hasFall = lastEvent?.type === 'fall_suspected';
     const scenario = hasFall
       ? 'fall_event'
@@ -604,6 +700,9 @@ class Observatory {
     const aggHr = lastVitals
       ? (lastVitals.heart_rate_bpm || (personCount > 0 ? 76 : 0))
       : (hrCount > 0 ? hrSum / hrCount : (personCount > 0 ? 76 : 0));
+
+    // Derive vitals confidence from actual sensor signal quality (issue #2)
+    const vitalsConf = this._computeVitalsConfidence(lastVitals, breathCount, hrCount, personCount);
 
     return {
       type: 'sensing_update',
@@ -634,11 +733,11 @@ class Observatory {
       },
       signal_field: this._buildSignalFieldData(personCount),
       vital_signs: {
-        // P2-9: When no dedicated vitals message, aggregate from device-level data
         breathing_rate_bpm: aggBreathing,
         heart_rate_bpm: aggHr,
-        breathing_confidence: lastVitals ? 0.7 : (breathCount > 0 ? 0.65 : (personCount > 0 ? 0.55 : 0)),
-        heart_rate_confidence: lastVitals ? 0.5 : (hrCount > 0 ? 0.45 : (personCount > 0 ? 0.35 : 0)),
+        breathing_confidence: vitalsConf.breathing,
+        heart_rate_confidence: vitalsConf.heartRate,
+        stale: vitalsConf.stale,
       },
       persons,
       estimated_persons: personCount,

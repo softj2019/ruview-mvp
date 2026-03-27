@@ -15,24 +15,14 @@ import ResidentsPage from './pages/ResidentsPage';
 import ReportsPage from './pages/ReportsPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import { useDeviceStore, type Device } from '@/stores/deviceStore';
-import { useZoneStore, type Zone } from '@/stores/zoneStore';
-import { useEventStore, type DetectionEvent } from '@/stores/eventStore';
-import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
-import { useAlertStore, type AlertItem } from '@/stores/alertStore';
+import { useDeviceStore } from '@/stores/deviceStore';
+import { useZoneStore } from '@/stores/zoneStore';
+import { useEventStore } from '@/stores/eventStore';
+import { useSignalStore } from '@/stores/signalStore';
+import { useAlertStore } from '@/stores/alertStore';
 import AlertToast from '@/components/alerts/AlertToast';
 import FallAlertBanner from '@/components/alerts/FallAlertBanner';
-
-/* ── WebSocket message discriminated union ── */
-type WSMessage =
-  | { type: 'init'; payload: { devices?: Device[]; zones?: Zone[] } }
-  | { type: 'event'; payload: DetectionEvent }
-  | { type: 'signal'; payload: SignalPoint }
-  | { type: 'device_update'; payload: { devices: Device[] } }
-  | { type: 'zone_update'; payload: { zones: Zone[] } }
-  | { type: 'vitals'; payload: unknown }
-  | { type: 'camera_detection'; payload: unknown }
-  | { type: 'alert'; payload: AlertItem };
+import type { WSMessage } from '@/types/ws-contract';
 
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
