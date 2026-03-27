@@ -7,53 +7,86 @@ on:
     branches: [main]
 
 jobs:
-  lint-and-type-check:
+  frontend:
+    name: Frontend (lint + typecheck + build)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Install and typecheck
-        run: |
-          cd apps/web-monitor
-          npm install
-          npm run typecheck
-
-  build-web:
-    runs-on: ubuntu-latest
-    needs: lint-and-type-check
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      - name: Build web-monitor
-        run: |
-          cd apps/web-monitor
-          npm install
-          npm run build
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Lint
+        run: pnpm --filter web-monitor lint
+      - name: Typecheck
+        run: pnpm --filter web-monitor typecheck
+      - name: Build
+        run: pnpm --filter web-monitor build
       - uses: actions/upload-artifact@v4
         with:
           name: web-monitor-dist
           path: apps/web-monitor/dist
 
   python-test:
+    name: Python (signal-adapter tests)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           cd services/signal-adapter
           pip install -r requirements.txt
-      - name: Verify CSIProcessor import
+          pip install pytest pytest-asyncio
+      - name: Run unit tests
         run: |
           cd services/signal-adapter
-          python -c "from csi_processor import CSIProcessor; print('import ok')"
-      - name: Verify FastAPI app import
+          python -m pytest tests/ -v --tb=short
+      - name: Verify imports
         run: |
           cd services/signal-adapter
-          python -c "from main import app; print('app ok')"
+          python -c "from csi_processor import CSIProcessor; print('CSIProcessor ok')"
+          python -c "from main import app; print('FastAPI app ok')"
+
+  api-gateway:
+    name: API Gateway (import check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install and verify
+        run: |
+          cd apps/api-gateway
+          pip install -r requirements.txt
+          python -c "from app.main import app; print('api-gateway ok')"
+
+  firmware:
+    name: Firmware (ESP32-S3 IDF v5.5.3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - name: Build ESP32-S3 firmware (8MB)
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.3
+          target: esp32s3
+          path: vendor/ruview-temp/firmware/esp32-csi-node
+          command: idf.py build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: esp32-csi-node-firmware
+          path: |
+            vendor/ruview-temp/firmware/esp32-csi-node/build/esp32-csi-node.bin
+            vendor/ruview-temp/firmware/esp32-csi-node/build/bootloader/bootloader.bin
+            vendor/ruview-temp/firmware/esp32-csi-node/build/partition_table/partition-table.bin
+            vendor/ruview-temp/firmware/esp32-csi-node/build/ota_data_initial.bin

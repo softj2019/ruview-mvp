@@ -8,6 +8,7 @@ interface HealthStatus {
   cloudflareBridge: boolean;
   dataSource: 'ESP32 Hardware' | 'Demo Mode';
   uptime: number; // seconds
+  activeModality: string;
 }
 
 const POLL_INTERVAL = 10_000;
@@ -28,11 +29,12 @@ async function fetchHealth(): Promise<HealthStatus> {
     cloudflareBridge: false,
     dataSource: 'Demo Mode',
     uptime: 0,
+    activeModality: 'unknown',
   };
 
   try {
     const [apiRes, camRes] = await Promise.allSettled([
-      fetch('/api/health', { signal: AbortSignal.timeout(5000) }),
+      fetch('/health', { signal: AbortSignal.timeout(5000) }),
       fetch('/cam/health', { signal: AbortSignal.timeout(5000) }),
     ]);
 
@@ -63,6 +65,7 @@ async function fetchHealth(): Promise<HealthStatus> {
       cloudflareBridge: apiOk, // bridge is healthy if API responds
       dataSource: isHardware ? 'ESP32 Hardware' : 'Demo Mode',
       uptime: typeof apiData.uptime === 'number' ? apiData.uptime : defaults.uptime,
+      activeModality: typeof apiData.active_modality === 'string' ? apiData.active_modality : 'unknown',
     };
   } catch {
     return defaults;
@@ -95,6 +98,7 @@ export default function SystemStatus() {
     cloudflareBridge: false,
     dataSource: 'Demo Mode',
     uptime: 0,
+    activeModality: 'unknown',
   });
 
   useEffect(() => {
@@ -131,6 +135,19 @@ export default function SystemStatus() {
             }`}
           >
             {health.dataSource}
+          </span>
+        </div>
+
+        <div className="mt-1.5 flex items-center justify-between">
+          <span className="text-xs text-gray-500">모달리티</span>
+          <span className={`text-xs font-medium ${
+            health.activeModality === 'camera+csi' ? 'text-emerald-400'
+            : health.activeModality === 'camera+csi_degraded' ? 'text-amber-400'
+            : 'text-cyan-400'
+          }`}>
+            {health.activeModality === 'camera+csi' ? 'Camera+CSI'
+             : health.activeModality === 'camera+csi_degraded' ? 'Camera+CSI (저조도)'
+             : 'CSI Only'}
           </span>
         </div>
 

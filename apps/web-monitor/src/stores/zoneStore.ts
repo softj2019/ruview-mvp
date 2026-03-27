@@ -9,6 +9,8 @@ export interface Zone {
   id: string;
   name: string;
   polygon: Point[];
+  /** 층 식별자 (B1 / 1F / 2F / 3F). 기본값: '1F' */
+  floor?: string;
   status: 'active' | 'inactive' | 'alert';
   presenceCount: number;
   lastActivity: string | null;

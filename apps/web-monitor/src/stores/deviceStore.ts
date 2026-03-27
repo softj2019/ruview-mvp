@@ -10,6 +10,12 @@ export interface Device {
   signalStrength: number | null;
   lastSeen: string;
   firmwareVersion: string;
+  // Hardware spec fields (populated by signal-adapter on device registration)
+  model?: string;          // e.g. "ESP32-S3-WROOM-1-N8R8"
+  chipType?: string;       // e.g. "ESP32-S3 LX7×2 240MHz"
+  flashSize?: string;      // e.g. "8MB QSPI DIO 80MHz"
+  psramSize?: string;      // e.g. "8MB Octal SPI"
+  idfVersion?: string;     // e.g. "v5.4"
   motion_energy?: number;
   presence_score?: number;
   n_persons?: number;

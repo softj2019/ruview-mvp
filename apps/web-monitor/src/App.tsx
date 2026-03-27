@@ -10,6 +10,7 @@ import HardwarePage from './pages/HardwarePage';
 import LiveDemoPage from './pages/LiveDemoPage';
 import ObservatoryPage from './pages/ObservatoryPage';
 import VizPage from './pages/VizPage';
+import BuildingPage from './pages/BuildingPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore, type Device } from '@/stores/deviceStore';
@@ -18,6 +19,7 @@ import { useEventStore, type DetectionEvent } from '@/stores/eventStore';
 import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
 import { useAlertStore, type AlertItem } from '@/stores/alertStore';
 import AlertToast from '@/components/alerts/AlertToast';
+import FallAlertBanner from '@/components/alerts/FallAlertBanner';
 
 /* ── WebSocket message discriminated union ── */
 type WSMessage =
@@ -104,6 +106,7 @@ function DataProvider({ children }: { children: React.ReactNode }) {
   return (
     <>
       <AlertToast />
+      <FallAlertBanner />
       {children}
     </>
   );
@@ -124,6 +127,7 @@ export default function App() {
           <Route path="/live-demo" element={<LiveDemoPage />} />
           <Route path="/observatory" element={<ObservatoryPage />} />
           <Route path="/viz" element={<VizPage />} />
+          <Route path="/building" element={<BuildingPage />} />
         </Route>
       </Routes>
     </DataProvider>

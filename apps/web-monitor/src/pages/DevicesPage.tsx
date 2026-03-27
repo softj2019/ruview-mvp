@@ -32,7 +32,7 @@ export default function DevicesPage() {
                 <WifiOff className="h-5 w-5 text-gray-600" />
               )}
               <h3 className="font-medium text-gray-200">{device.name}</h3>
-              <Badge variant={device.status === 'online' ? 'success' : 'default'} className="ml-auto">
+              <Badge variant={device.status === 'online' ? 'success' : 'default'} className="ml-auto mr-1">
                 {device.status === 'online' ? '온라인' : '오프라인'}
               </Badge>
             </div>
@@ -50,6 +50,11 @@ export default function DevicesPage() {
                 <span>MAC: {device.mac}</span>
               </div>
               <p className="text-xs text-gray-600">펌웨어: {device.firmwareVersion}</p>
+              {device.model && (
+                <p className="text-xs text-gray-600 font-mono">
+                  {device.model} · Flash {device.flashSize} · PSRAM {device.psramSize}
+                </p>
+              )}
             </div>
           </Card>
         ))}
