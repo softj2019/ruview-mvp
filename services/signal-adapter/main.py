@@ -320,7 +320,9 @@ class SignalAdapterRuntime:
                 tracker["stats"].update(score)
                 if tracker["stats"].count >= 60:
                     tracker["calibrated"] = True
-                    tracker["threshold"] = tracker["stats"].mean + 3.0 * tracker["stats"].std()
+                    # 5σ + 절대 최소 마진 0.05 — std가 너무 작을 때 false positive 방지
+                    raw_thr = tracker["stats"].mean + 5.0 * tracker["stats"].std()
+                    tracker["threshold"] = max(raw_thr, tracker["stats"].mean + 0.05)
                     dev["_presence_baseline"] = tracker["stats"].mean
                     dev["_presence_threshold"] = tracker["threshold"]
                 continue

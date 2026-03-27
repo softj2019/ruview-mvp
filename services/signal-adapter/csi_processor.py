@@ -315,7 +315,11 @@ class CSIProcessor:
             velocity_profile, max_velocity = self._compute_bvp(phase_arr_bvp)
 
         # Multi-person separation via subcarrier correlation clustering
-        estimated_persons, per_person_breathing = self._estimate_persons(device_id)
+        # presence_score < 0.15 = 빈방 노이즈 → 인원 추정 스킵
+        if presence_score >= MIN_PRESENCE_FOR_VITALS:
+            estimated_persons, per_person_breathing = self._estimate_persons(device_id)
+        else:
+            estimated_persons, per_person_breathing = 0, None
 
         # --- Step 7: CSI-based pose classification ---
         csi_pose, csi_pose_confidence = self._classify_pose_csi(

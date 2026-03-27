@@ -116,7 +116,9 @@ def analyze():
         zone = d.get("zone_id", "?")
 
         # 이상 감지
-        if st == "offline":
+        # node-6: 전원 OFF 상태 (의도적) — 오프라인 알림 제외
+        KNOWN_OFFLINE = {"node-6"}
+        if st == "offline" and did not in KNOWN_OFFLINE:
             issues_found.append(f"[OFFLINE] {did} 오프라인 — 물리 점검 필요")
         if st == "online" and ps < 0.15:
             issues_found.append(f"[LOW_PRESENCE] {did} presence_score={ps:.3f} (노이즈 수준)")
