@@ -11,8 +11,19 @@ from typing import Any
 import numpy as np
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+
+
+async def verify_api_key(authorization: str | None = Header(None)):
+    """Verify Bearer token for mutation endpoints. Skip if RUVIEW_API_KEY not set."""
+    api_key = os.getenv("RUVIEW_API_KEY")
+    if not api_key:
+        return  # auth disabled when key not configured
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    if authorization[7:] != api_key:
+        raise HTTPException(status_code=403, detail="Invalid API key")
 
 try:
     from .ws_manager import ConnectionManager
@@ -208,6 +219,8 @@ class SignalAdapterRuntime:
         self._camera_last_person_ts: float = 0.0
         # Active modality for confidence-based switching (Phase 5-4)
         self._active_modality: str = "csi_only"
+        self._camera_confidence: float = 0.0   # rolling camera reliability (0-1)
+        self._csi_confidence: float = 0.5       # rolling CSI reliability (0-1)
         # Fall detection ML framework (Phase 3-1~3-3)
         self.fall_detector = FallDetector()
         self._motion_history: dict[str, list[float]] = {}  # device_id -> recent motion values
@@ -346,28 +359,50 @@ class SignalAdapterRuntime:
             if csi_persons > csi_person_max:
                 csi_person_max = csi_persons
 
+        # Check if any CSI node shows active motion
+        any_motion = any(
+            dev.get("motion_index", 0) > 0.5
+            for dev in self.devices.values()
+            if dev.get("status") == "online"
+        )
+
         # Time-based camera fusion: only use camera if detection is fresh (< 2s)
         camera_age = _time.monotonic() - self._camera_detection_ts
         if camera_age > 2.0:
             camera = 0  # stale camera data — use CSI-only
 
         # --- Confidence-based modality switching (Phase 5-4) ---
-        # Track ambient light approximation: camera detecting persons = light enough
+        now = _time.monotonic()
         if camera > 0:
-            self._camera_last_person_ts = _time.monotonic()
+            self._camera_last_person_ts = now
 
-        camera_person_age = _time.monotonic() - self._camera_last_person_ts
-        if self._camera_last_person_ts > 0 and camera_person_age <= 30.0:
-            # Camera has detected persons within last 30s — camera+CSI mode
+        camera_person_age = now - self._camera_last_person_ts
+        csi_estimate = max(fused, nodes_with_presence, nodes_breathing, csi_person_max)
+
+        # Update rolling confidence scores (EMA α=0.1)
+        alpha = 0.1
+        camera_responsive = self._camera_last_person_ts > 0 and camera_person_age <= 30.0
+        self._camera_confidence += alpha * ((1.0 if camera_responsive else 0.0) - self._camera_confidence)
+        csi_active = nodes_with_presence > 0 or any_motion
+        self._csi_confidence += alpha * ((1.0 if csi_active else 0.3) - self._csi_confidence)
+
+        # Select modality based on confidence thresholds
+        if self._camera_confidence >= 0.5 and camera_responsive:
+            # Camera reliable — full fusion mode
             self._active_modality = "camera+csi"
-            # Weighted fusion: camera 80%, CSI 20%
-            csi_estimate = max(fused, nodes_with_presence, nodes_breathing, csi_person_max)
-            total = round(camera * 0.8 + csi_estimate * 0.2)
-            total = max(total, 1)  # at least 1 if camera saw someone recently
+            cam_w = min(self._camera_confidence, 0.8)
+            csi_w = 1.0 - cam_w
+            total = round(camera * cam_w + csi_estimate * csi_w)
+            total = max(total, 1)
+        elif self._camera_confidence >= 0.2 and camera_responsive:
+            # Camera degraded — equal weight fusion
+            self._active_modality = "camera+csi_degraded"
+            total = round(camera * 0.5 + csi_estimate * 0.5)
+            total = max(total, 1) if camera > 0 or csi_estimate > 0 else 0
         else:
-            # Camera hasn't detected anyone for 30+ seconds (darkness/occlusion)
+            # Camera dark/unavailable — CSI-only mode
             self._active_modality = "csi_only"
-            total = max(camera, fused, nodes_with_presence, nodes_breathing, csi_person_max)
+            total = csi_estimate
 
         # --- Per-zone presence counts ---
         self._recompute_zone_presence()
@@ -417,8 +452,21 @@ class SignalAdapterRuntime:
                 "y": y,
                 "signalStrength": None,
                 "lastSeen": iso_now(),
-                "firmwareVersion": "RuView operational",
+                "firmwareVersion": "RuView CSI Node / ESP-IDF v5.5.3",
+                "model": "ESP32-S3-WROOM-1-N8R8",
+                "chipType": "ESP32-S3 LX7×2 240MHz",
+                "flashSize": "8MB QSPI DIO 80MHz",
+                "psramSize": "8MB Octal SPI",
+                "idfVersion": "v5.5.3",
             }
+        else:
+            existing_ip = self.devices[device_id].get("mac", "")
+            if ip and existing_ip and existing_ip != ip and not existing_ip.startswith("node"):
+                import logging
+                logging.warning(
+                    f"[node_id collision] node_id={node_id} already registered from {existing_ip}, "
+                    f"new packet from {ip}. Check provision.py — each node must have a unique ID."
+                )
         return self.devices[device_id]
 
     async def broadcast(self, message_type: str, payload: dict[str, Any]) -> None:
@@ -589,6 +637,12 @@ class SignalAdapterRuntime:
 
         # Include breathing and heart rate in signal payload for chart
         dev = self.devices.get(processed.device_id, {})
+
+        # Sample up to 30 subcarrier amplitudes for Observatory CSI heatmap
+        _amp = processed.amplitude or []
+        _step = max(1, len(_amp) // 30)
+        _sampled = [round(float(_amp[i]), 3) for i in range(0, min(len(_amp), _step * 30), _step)]
+
         signal_payload = {
             "device_id": processed.device_id,
             "time": processed.timestamp[11:19] if len(processed.timestamp) >= 19 else processed.timestamp,
@@ -598,6 +652,8 @@ class SignalAdapterRuntime:
             "motion_index": round(processed.motion_index, 3),
             "breathing_rate": round(dev.get("breathing_bpm", 0) or 0, 1),
             "heart_rate": round(dev.get("heart_rate", 0) or 0, 1),
+            "csi_amplitudes": _sampled,
+            "n_subcarriers": len(_amp),
         }
         await self.broadcast("signal", signal_payload)
 
@@ -708,7 +764,9 @@ class SignalAdapterRuntime:
         node_id = data[4]
         flags = data[5]
         breathing_bpm = struct.unpack_from("<H", data, 6)[0] / 100.0
-        heart_rate = struct.unpack_from("<f", data, 8)[0]
+        heart_rate = struct.unpack_from("<I", data, 8)[0] / 10000.0
+        if not (20.0 <= heart_rate <= 250.0):
+            heart_rate = 0.0
         rssi = struct.unpack_from("<b", data, 12)[0]
         n_persons = data[13]
         motion_energy = struct.unpack_from("<f", data, 16)[0]
@@ -1030,7 +1088,7 @@ async def list_devices():
     return {"data": list(runtime.devices.values())}
 
 
-@app.put("/api/devices/{device_id}/position")
+@app.put("/api/devices/{device_id}/position", dependencies=[Depends(verify_api_key)])
 async def update_device_position(device_id: str, body: dict):
     """Update device position on floor plan (drag-drop)."""
     if device_id not in runtime.devices:
@@ -1068,7 +1126,7 @@ def _fuse_poses(camera_pose: str | None, camera_conf: float,
     return ("unknown", 0.0)
 
 
-@app.post("/api/camera/detections")
+@app.post("/api/camera/detections", dependencies=[Depends(verify_api_key)])
 async def camera_detections(body: dict):
     """Receive detection results from camera-service for CSI+camera fusion."""
     person_count = body.get("person_count", 0)
@@ -1247,7 +1305,7 @@ async def list_zones():
     return {"data": runtime.zones}
 
 
-@app.put("/api/zones/presence")
+@app.put("/api/zones/presence", dependencies=[Depends(verify_api_key)])
 async def set_presence_count(body: dict):
     """Manually set presenceCount (overrides sensor fusion)."""
     count = body.get("count")
@@ -1259,7 +1317,7 @@ async def set_presence_count(body: dict):
     return {"presenceCount": count, "mode": "manual"}
 
 
-@app.delete("/api/zones/presence")
+@app.delete("/api/zones/presence", dependencies=[Depends(verify_api_key)])
 async def clear_presence_override():
     """Clear manual override, return to sensor fusion mode."""
     runtime.zones[0].pop("_manual_override", None)
@@ -1273,7 +1331,7 @@ async def get_scenario():
     return {"scenario": "hardware-live", "mode": "hardware", "supported": False}
 
 
-@app.post("/api/scenario/{scenario}")
+@app.post("/api/scenario/{scenario}", dependencies=[Depends(verify_api_key)])
 async def set_scenario(scenario: str):
     raise HTTPException(status_code=409, detail=f"Scenario switching is disabled in hardware mode: {scenario}")
 
@@ -1300,7 +1358,7 @@ async def websocket_events(websocket: WebSocket):
         runtime.manager.disconnect(websocket)
 
 
-@app.post("/api/calibration/empty-room")
+@app.post("/api/calibration/empty-room", dependencies=[Depends(verify_api_key)])
 async def calibrate_empty_room():
     """Snapshot current state as empty-room baseline and reset Welford trackers."""
     result = runtime.calibrate_empty_room()
@@ -1314,7 +1372,7 @@ async def get_learning_report():
     return runtime.generate_learning_report()
 
 
-@app.post("/api/fall/record")
+@app.post("/api/fall/record", dependencies=[Depends(verify_api_key)])
 async def fall_record(body: dict):
     """Record a fall/non-fall event for ML training data collection.
 
@@ -1342,7 +1400,7 @@ async def fall_record(body: dict):
     return {"status": "ok", "features": features, "label": bool(label)}
 
 
-@app.post("/api/fall/train")
+@app.post("/api/fall/train", dependencies=[Depends(verify_api_key)])
 async def fall_train():
     """Trigger ML model training from collected fall detection data."""
     import asyncio
@@ -1382,7 +1440,7 @@ async def mmwave_status():
     return runtime.mmwave_bridge.get_status()
 
 
-@app.post("/api/csi/ingest")
+@app.post("/api/csi/ingest", dependencies=[Depends(verify_api_key)])
 async def ingest_csi(payload: dict):
     processed = runtime.csi_processor.process(payload)
     await runtime.handle_processed(processed)
