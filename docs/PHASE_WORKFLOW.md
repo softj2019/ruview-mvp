@@ -1,7 +1,7 @@
 # RuView Phase Workflow
 
 > **목표**: ruvnet/RuView를 원본 베이스로, 요양원·건물관제 특화 WiFi-Sensing 플랫폼으로 커스터마이징
-> **갱신**: 2026-03-27 | 95+ commits | v0.1.0-alpha
+> **갱신**: 2026-03-27 (전수검증 완료) | 95+ commits | v0.1.0-alpha
 > **원본 베이스**: `d:/home/ruvnet-RuView` (ruvnet/RuView.git)
 > **배포**: https://ruview-monitor.pages.dev (Cloudflare Pages)
 
@@ -23,14 +23,16 @@
 | Phase | 영역 | 진행률 | 잔여 핵심 작업 |
 |-------|------|--------|--------------|
 | 0 기반정렬 | 안정화·검증 | 85% | 노드 위치 검증, 캘리브레이션 |
-| 1 Observatory 이식 | 3D 관측소 완전 구현 | 40% | figure-pool, pose-system 등 9개 모듈 |
-| 2 UI 컴포넌트 이식 | ruvnet 12개 컴포넌트 React 변환 | 30% | body-model, env, gaussian-splats |
-| 3 신호처리 알고리즘 | HW Normalizer, HRV, Gesture | 55% | Hardware Normalizer, HRV 완성, Gesture |
-| 4 백엔드 서비스 | Model/Training/Orchestrator API | 30% | model.py, training.py, health 확장 |
+| 1 Observatory 이식 | 3D 관측소 완전 구현 | 55% | nebula, post-processing, mist 4개 모듈 |
+| 2 UI 컴포넌트 이식 | ruvnet 15개 컴포넌트 React 변환 | 30% | PoseDetectionCanvas, dashboard-hud, signal-viz |
+| 3 신호처리 알고리즘 | HW Normalizer, HRV, Gesture, DensePose | 65% | DTW Gesture, RF Tomography, DensePose 헤드 |
+| 4 백엔드 서비스 | Pose/Stream/Sensing/Model/Training API | 20% | Pose API, Stream API, Sensing 패키지 전체 |
 | 5 카메라/ML 고도화 | AETHER re-ID, 낙상 모델 | 70% | 데이터 150건 수집, AETHER |
 | 6 Rust 포팅 | 4 crates 구현 | 10% | toolchain 설치, signal 구현 |
-| 7 품질/배포 | QEMU, Witness, Blue-Green | 60% | QEMU, Witness, README |
+| 7 품질/배포 | QEMU, Witness, Blue-Green, Prometheus | 55% | Grafana 스택, QEMU chaos/mesh, README |
 | 8 커스텀 기능 | 돌봄·건물관제 특화 | 0% | 알림 워크플로, 멀티층 뷰 |
+| 9 펌웨어 고도화 | WASM, Swarm, OTA, Display | 0% | wasm_runtime, swarm_bridge, ota_update |
+| 10 모바일·데스크톱 | React Native Expo, Tauri | 0% | 모바일 앱, 데스크톱 앱 |
 
 ---
 
@@ -46,7 +48,9 @@ Phase 0 (기반정렬)
   ├─→ Phase 4 (백엔드 서비스)
   │      ├─→ Phase 6 (Rust 포팅)
   │      └─→ Phase 7 (품질/배포)
-  └─→ Phase 8 (커스텀: Phase 0-6 인증 완료 후 병행 가능)
+  ├─→ Phase 8 (커스텀: 0-6 인증 완료 후 병행)
+  ├─→ Phase 9 (펌웨어 고도화: Phase 6 WASM 이후)
+  └─→ Phase 10 (모바일·데스크톱: Phase 4+7 완료 후)
 ```
 
 Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
@@ -174,6 +178,16 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 | 2-11 | TrainingPanel.js | 419 | PORT | P2 | CSI 녹음/훈련상태/손실차트(PCK) → components/training/TrainingPanel.tsx |
 | 2-12 | SettingsPanel.js + SettingsPanel | 971 | ADAPT | P2 | 전역 설정 패널 → SettingsPage.tsx 확장 |
 
+### 2-D. 누락 컴포넌트 (전수검증 후 추가)
+
+| # | ruvnet 파일 | 줄수 | 분류 | 우선순위 | 작업 |
+|---|-------------|------|------|----------|------|
+| 2-13 | PoseDetectionCanvas.js | 1552 | ADAPT | P1 | 실시간 스켈레톤 렌더링 + pose trail → PoseDetectionCanvas.tsx 전면 재구현 |
+| 2-14 | dashboard-hud.js | 429 | PORT | P1 | HUD 오버레이 (FPS/연결/신뢰도/모드) → components/observatory/DashboardHUD.tsx |
+| 2-15 | sensing.service.js | 375 | ADAPT | P1 | CSI 센싱 데이터 수집 + RSSI 실시간 푸시 → services/sensingService.ts |
+| 2-16 | observatory.html | - | ADAPT | P1 | Observatory 독립 페이지 → /observatory 라우트 추가 |
+| 2-17 | viz.html | - | ADAPT | P2 | 3D 시각화 독립 페이지 → /viz 라우트 추가 |
+
 > **구현 순서**: 2-1(useThreeScene) → 2-2+2-3 병렬 → 2-4 → 나머지 병렬
 > **주의**: BodyModelManager 클래스 → `useBodyModel(count: number)` 훅 패턴으로 분해
 
@@ -192,6 +206,11 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 | 3-4 | wifi-densepose-signal | PORT | P2 | **RF Tomography** (ISTA solver): MIMO 공간 재구성 → `rf_tomography.py` 신규 모듈 |
 | 3-5 | wifi-densepose-signal | ADAPT | P2 | **Intention Detection**: 200-500ms 선행신호 감지 → event_engine.py에 통합 |
 | 3-6 | ruvnet gesture.rs 참조 | PORT | P2 | **DTW Gesture Recognition**: 제스처 분류 → `gesture_classifier.py` 신규 모듈 |
+| 3-7 | v1/src/models/densepose_head.py | ADAPT | P2 | **DensePose 헤드 신경망**: PyTorch 24부위 분할+UV 회귀 → `models/densepose_head.py` |
+| 3-8 | v1/src/models/modality_translation.py | ADAPT | P2 | **Modality Translation**: CSI → 시각 특성 공간 변환 신경망 → `models/modality_translation.py` |
+| 3-9 | v1/src/sensing/classifier.py | ADAPT | P1 | **PresenceClassifier**: RSSI 기반 ABSENT/PRESENT_STILL/ACTIVE 분류 → `sensing/classifier.py` |
+| 3-10 | v1/src/sensing/feature_extractor.py | ADAPT | P1 | **RssiFeatureExtractor**: CUSUM 변화점 감지 + 호흡/운동 대역 검출 → `sensing/feature_extractor.py` |
+| 3-11 | v1/src/sensing/rssi_collector.py | ADAPT | P1 | **RssiCollector**: WiFi RSSI 시계열 수집 + 윈도우 관리 → `sensing/rssi_collector.py` |
 
 ---
 
@@ -208,6 +227,11 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 | 4-4 | training.service.js + TrainingPanel | ADAPT | P2 | **Training API**: /api/v1/train/start-stop, /api/v1/recording/start-stop → `apps/api-gateway/app/routes/training.py` |
 | 4-5 | data-processor.js | ADAPT | P2 | **데이터 전처리 파이프라인**: 서버사이드 정규화 → `signal-adapter/main.py` 통합 |
 | 4-6 | orchestrator.py 참조 | CUSTOM | P2 | **OrchestratorService**: 서비스 라이프사이클 관리 → `services/orchestrator.py` (start_all.sh 대체) |
+| 4-7 | v1/src/api/routers/pose.py | ADAPT | P1 | **Pose API 완성**: POST /analyze, /historical, GET /zone-occupancy/{id}, /zones-summary, /activities, /calibrate, /stats → `routes/pose.py` |
+| 4-8 | v1/src/api/routers/stream.py | ADAPT | P1 | **Stream API 완성**: WS /api/v1/stream/pose, GET /stream/status, fps 제어 → `routes/stream.py` |
+| 4-9 | v1/src/api/routers/health.py | ADAPT | P1 | **Ready 엔드포인트**: GET /ready (readiness probe) → `routes/health.py` 확장 |
+| 4-10 | v1/src/database/ | ADAPT | P2 | **Database ORM + Migrations**: SQLAlchemy Device/Event/CSI 모델 + Alembic → `apps/api-gateway/database/` |
+| 4-11 | v1/src/tasks/ | ADAPT | P3 | **Background Tasks**: backup.py / cleanup.py / monitoring.py → `apps/api-gateway/tasks/` |
 
 ---
 
@@ -266,8 +290,11 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 | 7-2 | - | CUSTOM | P1 | **단위 테스트 추가**: signal-adapter + api-gateway 각 80% 커버리지 목표 |
 | 7-3 | infra/blue-green 참조 | CUSTOM | P2 | **Blue-Green 무중단 배포** → `infra/blue-green/` |
 | 7-4 | qemu-esp32s3-test.sh 등 | ADAPT | P3 | **QEMU 펌웨어 테스트** 9층 프레임워크 이식 → `firmware/tests/` |
-| 7-5 | generate-witness-bundle.sh + WITNESS-LOG-028.md | ADAPT | P3 | **Witness Verification** SHA-256 증명 시스템 → `infra/witness/` |
-| 7-6 | swarm_health.py | ADAPT | P3 | **Swarm Health 오라클**: 다중 노드 건강 모니터링 → `monitoring/` |
+| 7-5 | qemu-chaos-test.sh, qemu-mesh-test.sh | ADAPT | P3 | **QEMU 고급 테스트**: chaos 주입 + 다중노드 메시 + 스냅샷 회귀 → `firmware/tests/advanced/` |
+| 7-6 | generate-witness-bundle.sh + WITNESS-LOG-028.md | ADAPT | P3 | **Witness Verification** SHA-256 증명 시스템 → `infra/witness/` |
+| 7-7 | swarm_health.py | ADAPT | P3 | **Swarm Health 오라클**: 다중 노드 건강 모니터링 → `monitoring/` |
+| 7-8 | monitoring/prometheus-config.yml + grafana-dashboard.json | ADAPT | P2 | **Prometheus + Grafana 스택**: 수집 설정 + 대시보드 + 알림 규칙 → `infra/monitoring/` |
+| 7-9 | docker/Dockerfile.rust | ADAPT | P3 | **Rust 빌드 컨테이너**: Docker Compose에 rust-builder 서비스 추가 |
 
 ---
 
@@ -290,17 +317,52 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 
 ---
 
+## Phase 9: 펌웨어 고도화
+
+**목적**: ruvnet firmware/esp32-csi-node/의 고급 기능 이식
+**원본**: `d:/home/ruvnet-RuView/firmware/esp32-csi-node/main/`
+
+| # | ruvnet 파일 | 분류 | 우선순위 | 작업 |
+|---|-------------|------|----------|------|
+| 9-1 | wasm_runtime.c/h | PORT | P1 | **WASM3 온-디바이스 인터프리터**: ESP32에서 WASM 알고리즘 실행 (ADR-040) → `vendor/.../main/wasm_runtime.c/h` |
+| 9-2 | ota_update.c/h | PORT | P2 | **HTTP OTA 무선 업데이트**: 포트 8032, 파티션 안전 업데이트 → `vendor/.../main/ota_update.c/h` |
+| 9-3 | wasm_upload.c/h | PORT | P2 | **WASM 모듈 동적 업로드**: HTTP 엔드포인트로 런타임 알고리즘 교체 → `vendor/.../main/wasm_upload.c/h` |
+| 9-4 | swarm_bridge.c/h | PORT | P2 | **Swarm 코디네이터**: 멀티노드 Cognitum Seed 클러스터 (ADR-066) → `vendor/.../main/swarm_bridge.c/h` |
+| 9-5 | power_mgmt.c/h | PORT | P3 | **전력 관리**: Sleep/Wake 시간대별 스케줄 → `vendor/.../main/power_mgmt.c/h` |
+| 9-6 | display_task.c/h + display_ui.c/h | PORT | P3 | **LVGL 온보드 디스플레이**: ST7789/AMOLED 상태 표시 + CSI 히트맵 (ADR-045) → `vendor/.../main/display_*.c/h` |
+| 9-7 | rvf_parser.c/h | PORT | P3 | **RVF 바이너리 파서**: RuVector Format 파싱 (ADR-002) → `vendor/.../main/rvf_parser.c/h` |
+
+> **의존성**: Phase 6 Rust WASM(6-5) 완료 후 9-1 진행. 9-2(OTA)는 펌웨어 안정화(Phase 0) 이후.
+
+---
+
+## Phase 10: 모바일·데스크톱
+
+**목적**: ruvnet의 크로스플랫폼 클라이언트를 ruView에 이식
+**원본**: `d:/home/ruvnet-RuView/ui/mobile/`, `d:/home/ruvnet-RuView/rust-port/.../wifi-densepose-desktop/`
+
+| # | ruvnet 출처 | 분류 | 우선순위 | 작업 |
+|---|-------------|------|----------|------|
+| 10-1 | ui/mobile/ (React Native Expo) | ADAPT | P2 | **모바일 앱**: 화면/훅/네비게이션 → `apps/mobile/` (요양원 관리자용) |
+| 10-2 | ui/mobile/src/assets/webview/ | PORT | P2 | **모바일 웹뷰**: Gaussian Splats + Observatory 임베드 → 모바일 앱 내 3D 뷰 |
+| 10-3 | wifi-densepose-desktop (Tauri v2) | ADAPT | P3 | **Tauri 데스크톱 앱**: 로컬 관제 센터용 네이티브 앱 → `apps/desktop/` (ADR-054) |
+
+> **의존성**: Phase 4 API 완성 후 모바일 앱 개발 가능. Phase 6 Rust 이후 데스크톱 앱 가능.
+
+---
+
 ## 다음 즉시 실행 가능 작업
 
-> Phase 0 버그 수정 → Phase 1-A figure-pool + pose-system 병렬 이식
+> (2026-03-27 기준) Phase 0 잔여 → Phase 4-7,8 Pose/Stream API → Phase 2-13,14 누락 컴포넌트
 
 | 순서 | 작업 | Phase | 예상 |
 |------|------|-------|------|
-| 1 | breathing_bpm 범위 클램프 수정 | 0-1 | 30분 |
-| 2 | confidence 하드코딩 8곳 제거 | 0-2 | 1시간 |
-| 3 | figure-pool.js + pose-system.js 이식 | 1-1, 1-2 | 반나절 |
-| 4 | useThreeScene 공용 훅 추출 | 2-1 | 2시간 |
-| 5 | Hardware Normalizer 구현 | 3-1 | 반나절 |
+| 1 | Pose API 완성 (analyze/zone-occupancy/calibrate) | 4-7 | 반나절 |
+| 2 | Stream API (WS /stream/pose) | 4-8 | 반나절 |
+| 3 | PoseDetectionCanvas.tsx 전면 재구현 | 2-13 | 하루 |
+| 4 | dashboard-hud.js → DashboardHUD.tsx 이식 | 2-14 | 2시간 |
+| 5 | Sensing 패키지 (classifier + feature_extractor) | 3-9, 3-10 | 하루 |
+| 6 | nebula-background + post-processing 이식 | 1-5, 1-6 | 2시간 |
 
 ---
 
@@ -325,6 +387,28 @@ Phase 1·2·3·4는 병렬 진행 가능. Phase 5는 Phase 1+3 완료 후.
 | UI 탭 | `ui/components/DashboardTab.js` | Phase 2-7 |
 | UI 탭 | `ui/components/HardwareTab.js` | Phase 2-8 |
 | UI 탭 | `ui/components/LiveDemoTab.js` | Phase 2-9 |
+| UI 컴포넌트 | `ui/components/PoseDetectionCanvas.js` | Phase 2-13 |
+| UI 컴포넌트 | `ui/components/dashboard-hud.js` | Phase 2-14 |
+| UI 서비스 | `ui/services/sensing.service.js` | Phase 2-15 |
+| UI 페이지 | `ui/observatory.html` | Phase 2-16 |
+| UI 페이지 | `ui/viz.html` | Phase 2-17 |
+| Sensing 패키지 | `v1/src/sensing/classifier.py` | Phase 3-9 |
+| Sensing 패키지 | `v1/src/sensing/feature_extractor.py` | Phase 3-10 |
+| Sensing 패키지 | `v1/src/sensing/rssi_collector.py` | Phase 3-11 |
+| ML 모델 | `v1/src/models/densepose_head.py` | Phase 3-7 |
+| ML 모델 | `v1/src/models/modality_translation.py` | Phase 3-8 |
+| API | `v1/src/api/routers/pose.py` | Phase 4-7 |
+| API | `v1/src/api/routers/stream.py` | Phase 4-8 |
+| Database | `v1/src/database/` | Phase 4-10 |
+| 모니터링 | `monitoring/prometheus-config.yml` | Phase 7-8 |
+| 모니터링 | `monitoring/grafana-dashboard.json` | Phase 7-8 |
+| QEMU | `scripts/qemu-chaos-test.sh` | Phase 7-5 |
+| QEMU | `scripts/qemu-mesh-test.sh` | Phase 7-5 |
+| 펌웨어 | `firmware/.../wasm_runtime.c/h` | Phase 9-1 |
+| 펌웨어 | `firmware/.../ota_update.c/h` | Phase 9-2 |
+| 펌웨어 | `firmware/.../swarm_bridge.c/h` | Phase 9-4 |
+| 모바일 | `ui/mobile/` (React Native) | Phase 10-1 |
+| 데스크톱 | `rust-port/.../wifi-densepose-desktop/` | Phase 10-3 |
 | UI 패널 | `ui/components/ModelPanel.js` | Phase 2-10 |
 | UI 패널 | `ui/components/TrainingPanel.js` | Phase 2-11 |
 | UI 패널 | `ui/components/SettingsPanel.js` | Phase 2-12 |
