@@ -23,6 +23,7 @@ from typing import Any
 
 import numpy as np
 from scipy import signal as scipy_signal
+from scipy.interpolate import CubicSpline
 
 
 @dataclass
@@ -54,28 +55,42 @@ class ProcessedCSI:
 
 
 class WelfordStats:
-    """Welford online statistics — from ruvsense/field_model.rs."""
+    """Windowed Welford online statistics with EMA decay.
 
-    __slots__ = ("count", "mean", "m2")
+    Uses exponential moving average approach: after the window fills,
+    each update applies a decay factor so recent data is weighted more
+    heavily and variance stays sensitive to environmental changes.
+    """
 
-    def __init__(self):
+    __slots__ = ("count", "mean", "m2", "_window", "_alpha")
+
+    WINDOW = 2000       # effective window size
+    ALPHA = 0.998       # decay factor per sample (≈ 2000-sample half-life)
+
+    def __init__(self, window: int = WINDOW, alpha: float = ALPHA):
         self.count = 0
         self.mean = 0.0
         self.m2 = 0.0
+        self._window = window
+        self._alpha = alpha
 
     def update(self, value: float):
         self.count += 1
-        delta = value - self.mean
-        self.mean += delta / self.count
-        delta2 = value - self.mean
-        self.m2 += delta * delta2
-
-        # Windowed variant: after 10000 frames apply exponential decay
-        # so that recent data is weighted more heavily and variance
-        # remains sensitive instead of becoming frozen.
-        if self.count > 10000:
-            self.m2 *= 0.99
-            self.count = int(self.count * 0.99)
+        if self.count <= self._window:
+            # Standard Welford accumulation during warmup
+            delta = value - self.mean
+            self.mean += delta / self.count
+            delta2 = value - self.mean
+            self.m2 += delta * delta2
+        else:
+            # EMA decay: blend new sample, forget old proportionally
+            self.m2 *= self._alpha
+            delta = value - self.mean
+            self.mean += (1 - self._alpha) * delta
+            delta2 = value - self.mean
+            self.m2 += delta * delta2
+            # Keep effective count bounded to window size
+            self.count = self._window
 
     def variance(self) -> float:
         return self.m2 / (self.count - 1) if self.count > 1 else 0.0
@@ -132,6 +147,11 @@ class CSIProcessor:
         self._gesture_history: dict[str, deque] = {}
         self._gesture_history_size = 60
 
+        # Hardware normalizer state (작업 3: Phase 3-1)
+        # _hw_offsets[device_id] = {'sum': np.ndarray, 'count': int, 'baseline': np.ndarray | None}
+        self._hw_offsets: dict[str, dict] = {}
+        self.HW_NORM_WARMUP_FRAMES = 100  # 기준 설정에 필요한 최소 프레임 수
+
         # Butterworth filter coefficients (computed once)
         self._breath_sos = scipy_signal.butter(
             2, [0.1, 0.5], btype="band", fs=self.SAMPLE_RATE, output="sos"
@@ -184,6 +204,10 @@ class CSIProcessor:
             # Ported from wifi-densepose-signal/hampel.rs
             amplitude, hampel_outliers_removed = self._hampel_filter(amplitude)
 
+            # --- Step 2b: Hardware normalizer — cross-device amplitude 정규화 ---
+            # 다른 ESP32 보드 간 CSI 진폭 편차 보정 (Phase 3-1)
+            amplitude = self.normalize_hardware(np.array(amplitude, dtype=np.float64), device_id).tolist()
+
             # --- Step 3: Phase unwrapping (remove 2pi discontinuities) ---
             phase = self._unwrap_phase(device_id, phase_raw)
         else:
@@ -229,7 +253,12 @@ class CSIProcessor:
         history = self._phase_history.get(device_id)
         if history and len(history) >= self.MIN_FRAMES_VITALS:
             phase_arr = np.array(list(history))
-            breathing_rate = self._extract_breathing(phase_arr)
+            _br_raw = self._extract_breathing(phase_arr)
+            # 범위 클램프: 정상 호흡 6~30 BPM 외 값은 0.0 반환 (신뢰 불가 신호)
+            if _br_raw is not None and 6.0 <= _br_raw <= 30.0:
+                breathing_rate = _br_raw
+            else:
+                breathing_rate = 0.0 if _br_raw is not None else None
             heart_rate = self._extract_heart_rate(phase_arr)
 
         # --- Step 5: Fresnel zone confidence weighting ---
@@ -327,7 +356,7 @@ class CSIProcessor:
         if frame_count % self.HRV_INTERVAL_FRAMES == 0:
             hr_hist = self._hr_history.get(device_id)
             if hr_hist and len(hr_hist) >= 10:
-                hrv = self._compute_hrv(list(hr_hist))
+                hrv = self._compute_hrv_full(list(hr_hist))
                 self._last_hrv[device_id] = hrv
                 return hrv
 
@@ -335,8 +364,49 @@ class CSIProcessor:
         return self._last_hrv.get(device_id)
 
     @staticmethod
-    def _compute_hrv(heart_rate_history: list[float]) -> dict | None:
-        """Compute HRV metrics from heart rate history.
+    def _compute_hrv(rr_intervals: list[float]) -> dict:
+        """HRV 메트릭 계산 (Phase 3-2 완전 구현).
+
+        Args:
+            rr_intervals: R-R 간격 목록 (ms 단위), 3개 미만이면 모두 0.0 반환.
+
+        Returns:
+            {
+                'sdnn': float,    # 표준편차 (ms) — 전체 HRV
+                'rmssd': float,   # 연속 차이 RMS (ms) — 단기 HRV
+                'pnn50': float,   # 50ms 초과 비율 (%) — 부교감신경 지표
+                'mean_rr': float  # 평균 R-R 간격 (ms)
+            }
+        """
+        # 3개 미만이면 모두 0.0 반환
+        if len(rr_intervals) < 3:
+            return {"sdnn": 0.0, "rmssd": 0.0, "pnn50": 0.0, "mean_rr": 0.0}
+
+        rr = np.array(rr_intervals, dtype=np.float64)
+
+        # SDNN: sqrt(mean((RR_i - mean_RR)^2))  — 전체 HRV (population std)
+        sdnn = float(np.sqrt(np.mean((rr - np.mean(rr)) ** 2)))
+
+        # RMSSD: sqrt(mean((RR_i+1 - RR_i)^2))  — 단기 HRV
+        rr_diff = np.diff(rr)
+        rmssd = float(np.sqrt(np.mean(rr_diff ** 2))) if len(rr_diff) > 0 else 0.0
+
+        # pNN50: 100 * count(|RR_i+1 - RR_i| > 50) / (n-1)
+        nn50 = int(np.sum(np.abs(rr_diff) > 50.0))
+        pnn50 = (nn50 / len(rr_diff)) * 100.0 if len(rr_diff) > 0 else 0.0
+
+        mean_rr = float(np.mean(rr))
+
+        return {
+            "sdnn": round(sdnn, 2),
+            "rmssd": round(rmssd, 2),
+            "pnn50": round(pnn50, 2),
+            "mean_rr": round(mean_rr, 2),
+        }
+
+    @staticmethod
+    def _compute_hrv_full(heart_rate_history: list[float]) -> dict | None:
+        """Compute full HRV metrics including LF/HF ratio from HR history.
 
         Args:
             heart_rate_history: List of HR values (BPM), at least 10 values.
@@ -1186,3 +1256,85 @@ class CSIProcessor:
             return None
 
         return float(peak_freq * 60.0)  # Hz → BPM
+
+    # ------------------------------------------------------------------
+    # Hardware Normalizer (Phase 3-1)
+    # ------------------------------------------------------------------
+
+    def normalize_hardware(self, amplitude: np.ndarray, device_id: str) -> np.ndarray:
+        """하드웨어 간 CSI 진폭 정규화 (Catmull-Rom 보간 기반).
+
+        다른 ESP32 보드 간 캘리브레이션 편차를 보정한다.
+
+        알고리즘:
+          1. 첫 HW_NORM_WARMUP_FRAMES 프레임의 평균으로 device별 기준 진폭 벡터 설정.
+          2. 기준 설정 후 입력 amplitude에서 기준 오프셋을 차감해 편차를 제거.
+          3. CubicSpline(not-a-knot) 보간으로 빈/잡음 서브캐리어를 평활화.
+          4. 전체 진폭을 [0, 1] 범위로 Min-Max 정규화.
+
+        Args:
+            amplitude: 서브캐리어 진폭 벡터 (float64 ndarray), shape (n_sc,).
+            device_id:  ESP32 보드 식별자.
+
+        Returns:
+            정규화된 진폭 ndarray, shape (n_sc,). 입력이 비어 있으면 그대로 반환.
+        """
+        n = len(amplitude)
+        if n == 0:
+            return amplitude
+
+        # 디바이스 상태 초기화
+        if device_id not in self._hw_offsets:
+            self._hw_offsets[device_id] = {
+                "sum": np.zeros(n, dtype=np.float64),
+                "count": 0,
+                "baseline": None,
+            }
+
+        state = self._hw_offsets[device_id]
+
+        # 벡터 크기가 바뀐 경우 리셋 (채널 수 변경 대응)
+        if state["sum"].shape[0] != n:
+            state["sum"] = np.zeros(n, dtype=np.float64)
+            state["count"] = 0
+            state["baseline"] = None
+
+        # --- Step 1: 웜업 — 첫 100프레임 평균으로 기준 설정 ---
+        if state["count"] < self.HW_NORM_WARMUP_FRAMES:
+            state["sum"] += amplitude
+            state["count"] += 1
+            if state["count"] == self.HW_NORM_WARMUP_FRAMES:
+                state["baseline"] = state["sum"] / self.HW_NORM_WARMUP_FRAMES
+            # 웜업 중에는 원본 그대로 (정규화만 적용)
+            result = amplitude.copy()
+        else:
+            # --- Step 2: 기준 오프셋 차감 ---
+            baseline = state["baseline"]
+            result = amplitude - baseline  # type: ignore[operator]
+
+        # --- Step 3: Catmull-Rom(not-a-knot CubicSpline) 보간으로 평활화 ---
+        # 제로 또는 NaN 서브캐리어를 스킵하고 유효 인덱스만으로 스플라인 피팅
+        x_all = np.arange(n, dtype=np.float64)
+        valid_mask = np.isfinite(result) & (np.abs(result) > 1e-15)
+        n_valid = int(np.sum(valid_mask))
+
+        if n_valid >= 4:  # CubicSpline은 최소 2점 필요하나 4점부터 의미 있음
+            x_valid = x_all[valid_mask]
+            y_valid = result[valid_mask]
+            try:
+                cs = CubicSpline(x_valid, y_valid, bc_type="not-a-knot")
+                result = cs(x_all)
+            except Exception:
+                pass  # 보간 실패 시 원본 유지
+
+        # --- Step 4: [0, 1] Min-Max 정규화 ---
+        r_min = float(np.min(result))
+        r_max = float(np.max(result))
+        span = r_max - r_min
+        if span > 1e-15:
+            result = (result - r_min) / span
+        else:
+            # 모든 값이 동일 → 중간값 0.5로 설정
+            result = np.full(n, 0.5, dtype=np.float64)
+
+        return result

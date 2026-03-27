@@ -13,6 +13,7 @@
   "dependencies": {
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "three": "^0.175.0",
     "react-router-dom": "^7.6.0",
     "zustand": "^5.0.0",
     "@supabase/supabase-js": "^2.49.0",
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
+    "@types/three": "^0.175.0",
     "@vitejs/plugin-react": "^4.4.0",
     "autoprefixer": "^10.4.0",
     "eslint": "^9.0.0",

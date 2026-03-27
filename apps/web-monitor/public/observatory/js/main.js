@@ -16,6 +16,7 @@ import { NebulaBackground } from './nebula-background.js';
 import { PostProcessing } from './post-processing.js';
 import { FigurePool, SKELETON_PAIRS } from './figure-pool.js';
 import { PoseSystem } from './pose-system.js';
+import { ConvergenceEngine } from './convergence-engine.js';
 import { ScenarioProps } from './scenario-props.js';
 import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES } from './hud-controller.js';
 
@@ -117,6 +118,7 @@ class Observatory {
     this._buildVitalsOracle();
     this._buildPhaseConstellation();
     this._enhanceSignalFieldFloorZones();
+    this._buildConvergenceEngine();
 
     // Post-processing
     this._postProcessing = new PostProcessing(this._renderer, this._scene, this._camera);
@@ -403,7 +405,7 @@ class Observatory {
   // ---- Keyboard ----
 
   _initKeyboard() {
-    window.addEventListener('keydown', (e) => {
+    this._keydownHandler = (e) => {
       if (this._hud.settingsOpen) return;
       switch (e.key.toLowerCase()) {
         case 'a':
@@ -421,7 +423,22 @@ class Observatory {
           this._demoData.paused = !this._demoData.paused;
           break;
       }
-    });
+    };
+    window.addEventListener('keydown', this._keydownHandler);
+  }
+
+  destroy() {
+    if (this._keydownHandler) {
+      window.removeEventListener('keydown', this._keydownHandler);
+      this._keydownHandler = null;
+    }
+    if (this._animationId) {
+      cancelAnimationFrame(this._animationId);
+      this._animationId = null;
+    }
+    if (this._renderer) {
+      this._renderer.dispose();
+    }
   }
 
   // ---- Settings / HUD methods delegated to HudController ----
@@ -556,7 +573,7 @@ class Observatory {
       ? devices.reduce((sum, device) => sum + (device.signalStrength ?? -65), 0) / devices.length
       : -65;
     const motionIndex = lastSignal?.motion_index ?? (onlineDevices.length > 0 ? 0.12 : 0);
-    const personCount = this._liveState.zones[0]?.presenceCount || 0;
+    const personCount = this._liveState.zones.reduce((sum, z) => sum + (z.presenceCount || 0), 0);
     // Generate persons based on presenceCount (CSI-detected people), not device count
     const persons = this._generateExtraPersons(personCount, 0);
     const hasFall = lastEvent?.type === 'fall_suspected';
@@ -567,6 +584,22 @@ class Observatory {
         : personCount === 1
           ? 'single_breathing'
           : 'empty_room';
+
+    // Aggregate breathing_bpm and heart_rate from online devices (used in features + vital_signs)
+    let breathSum = 0, breathCount = 0, hrSum = 0, hrCount = 0;
+    for (const dev of onlineDevices) {
+      if (dev.breathing_bpm > 0) { breathSum += dev.breathing_bpm; breathCount++; }
+      if (dev.heart_rate > 0 || dev.csi_heart_rate > 0) {
+        hrSum += (dev.heart_rate || dev.csi_heart_rate || 0);
+        hrCount++;
+      }
+    }
+    const aggBreathing = lastVitals
+      ? (lastVitals.breathing_rate_bpm || (personCount > 0 ? 15 : 0))
+      : (breathCount > 0 ? breathSum / breathCount : (personCount > 0 ? 15 : 0));
+    const aggHr = lastVitals
+      ? (lastVitals.heart_rate_bpm || (personCount > 0 ? 76 : 0))
+      : (hrCount > 0 ? hrSum / hrCount : (personCount > 0 ? 76 : 0));
 
     return {
       type: 'sensing_update',
@@ -585,8 +618,8 @@ class Observatory {
         variance: Math.max(0.05, Math.abs(motionIndex) * 0.8),
         std: Math.max(0.1, Math.abs(motionIndex) * 0.5),
         motion_band_power: Math.max(0, motionIndex),
-        breathing_band_power: personCount > 0 ? 0.08 : 0,
-        dominant_freq_hz: personCount > 0 ? 0.23 : 0.02,
+        breathing_band_power: aggBreathing > 0 ? Math.min(0.25, aggBreathing / 30 * 0.3) : (personCount > 0 ? 0.08 : 0),
+        dominant_freq_hz: aggBreathing > 0 ? aggBreathing / 60 : (personCount > 0 ? 0.23 : 0.02),
         spectral_power: Math.max(0.02, Math.abs(motionIndex) * 0.9),
       },
       classification: {
@@ -596,38 +629,20 @@ class Observatory {
         fall_detected: hasFall,
       },
       signal_field: this._buildSignalFieldData(personCount),
-      vital_signs: (() => {
+      vital_signs: {
         // P2-9: When no dedicated vitals message, aggregate from device-level data
-        if (lastVitals) {
-          return {
-            breathing_rate_bpm: lastVitals.breathing_rate_bpm || (personCount > 0 ? 15 : 0),
-            heart_rate_bpm: lastVitals.heart_rate_bpm || (personCount > 0 ? 76 : 0),
-            breathing_confidence: 0.7,
-            heart_rate_confidence: 0.5,
-          };
-        }
-        // Aggregate breathing_bpm and heart_rate from online devices
-        let breathSum = 0, breathCount = 0, hrSum = 0, hrCount = 0;
-        for (const dev of onlineDevices) {
-          if (dev.breathing_bpm > 0) { breathSum += dev.breathing_bpm; breathCount++; }
-          if (dev.heart_rate > 0 || dev.csi_heart_rate > 0) {
-            hrSum += (dev.heart_rate || dev.csi_heart_rate || 0);
-            hrCount++;
-          }
-        }
-        const aggBreathing = breathCount > 0 ? breathSum / breathCount : (personCount > 0 ? 15 : 0);
-        const aggHr = hrCount > 0 ? hrSum / hrCount : (personCount > 0 ? 76 : 0);
-        return {
-          breathing_rate_bpm: aggBreathing,
-          heart_rate_bpm: aggHr,
-          breathing_confidence: breathCount > 0 ? 0.65 : (personCount > 0 ? 0.55 : 0),
-          heart_rate_confidence: hrCount > 0 ? 0.45 : (personCount > 0 ? 0.35 : 0),
-        };
-      })(),
+        breathing_rate_bpm: aggBreathing,
+        heart_rate_bpm: aggHr,
+        breathing_confidence: lastVitals ? 0.7 : (breathCount > 0 ? 0.65 : (personCount > 0 ? 0.55 : 0)),
+        heart_rate_confidence: lastVitals ? 0.5 : (hrCount > 0 ? 0.45 : (personCount > 0 ? 0.35 : 0)),
+      },
       persons,
       estimated_persons: personCount,
       edge_modules: {},
-      _observatory: { subcarrier_iq: [], per_subcarrier_variance: new Float32Array(64).fill(0.02) },
+      _observatory: {
+        subcarrier_iq: lastSignal?.csi_amplitudes || [],
+        per_subcarrier_variance: new Float32Array(64).fill(0.02),
+      },
     };
   }
 
@@ -781,6 +796,7 @@ class Observatory {
     this._updateSignalFieldFloor(data, elapsed);
     this._updateVitalsOracle(data, elapsed);
     this._updatePhaseConstellation(data, elapsed);
+    this._convergenceEngine.update(dt, elapsed, data);
     this._hud.tickFPS();
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);
@@ -1037,13 +1053,21 @@ class Observatory {
     const feat = data?.features || {};
     const motionPower = feat.motion_band_power || 0;
     const variance = feat.variance || 0;
+    const iqData = data?._observatory?.subcarrier_iq || [];
 
     for (let s = 0; s < 30; s++) {
-      // Synthesize amplitude from scene data, mimicking real CSI patterns
-      const baseFreq = Math.sin(elapsed * 2.0 + s * 0.3) * 0.25;
-      const bodyEffect = Math.sin(elapsed * 0.8 + s * 0.15) * variance * 0.5;
-      const noise = (Math.random() - 0.5) * 0.06;
-      amplitude[s] = Math.max(0, Math.min(1, 0.3 + motionPower * 0.4 + baseFreq + bodyEffect + noise));
+      if (iqData.length > 0) {
+        // Use real subcarrier amplitude from ESP32 (normalized 0-1)
+        const raw = iqData[s % iqData.length] || 0;
+        const noise = (Math.random() - 0.5) * 0.02;
+        amplitude[s] = Math.max(0, Math.min(1, raw + noise));
+      } else {
+        // Fallback: synthesize from motion/variance when no live data
+        const baseFreq = Math.sin(elapsed * 2.0 + s * 0.3) * 0.25;
+        const bodyEffect = Math.sin(elapsed * 0.8 + s * 0.15) * variance * 0.5;
+        const noise = (Math.random() - 0.5) * 0.06;
+        amplitude[s] = Math.max(0, Math.min(1, 0.3 + motionPower * 0.4 + baseFreq + bodyEffect + noise));
+      }
     }
 
     // P2-10: Ring buffer — overwrite at _csiTimeIndex instead of shift()
@@ -1810,6 +1834,17 @@ class Observatory {
     }
 
     this._scene.add(this._zoneGroup);
+  }
+
+  // ---- Convergence Engine ----
+
+  _buildConvergenceEngine() {
+    // Position the convergence panel on the right side of the scene
+    const panelGroup = new THREE.Group();
+    panelGroup.position.set(5, 1.5, -3);
+    panelGroup.rotation.y = -Math.PI / 6;
+    this._scene.add(panelGroup);
+    this._convergenceEngine = new ConvergenceEngine(this._scene, panelGroup);
   }
 
   // ---- FPS ----

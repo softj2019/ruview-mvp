@@ -54,10 +54,16 @@ function inferPose(device: Device): { pose: string; confidence: number } {
   const energy = device.motion_energy ?? 0;
   const br = device.csi_breathing_bpm ?? device.breathing_bpm ?? 0;
   const hr = device.csi_heart_rate ?? device.heart_rate ?? 0;
+  // Use store-provided presence_score as base confidence when available
+  const presenceBase = device.presence_score ?? 0;
 
   if (energy > 5) return { pose: 'Walking', confidence: Math.min(0.95, 0.5 + energy * 0.05) };
   if (energy > 1.5) return { pose: 'Standing', confidence: Math.min(0.9, 0.4 + energy * 0.1) };
-  if (br > 0 && hr > 0) return { pose: 'Sitting', confidence: 0.7 };
+  if (br > 0 && hr > 0) {
+    // Derive sitting confidence from vital signs quality instead of hardcoding 0.7
+    const vitalConf = Math.min(0.95, 0.3 + (br / 30) * 0.35 + (hr / 100) * 0.3);
+    return { pose: 'Sitting', confidence: presenceBase > 0 ? Math.min(0.95, (vitalConf + presenceBase) / 2) : vitalConf };
+  }
   return { pose: 'Unknown', confidence: 0 };
 }
 
@@ -209,7 +215,7 @@ function DeviceSensingCard({ device }: { device: Device }) {
             />
             <span className="text-gray-200 font-medium text-sm">{device.name}</span>
           </div>
-          <Badge variant={motion.variant}>{motion.label}</Badge>
+          <Badge variant={motion.variant} className="mr-1">{motion.label}</Badge>
         </div>
       </CardHeader>
 

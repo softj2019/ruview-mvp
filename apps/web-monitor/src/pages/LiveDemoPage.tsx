@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { useDeviceStore } from '@/stores/deviceStore';
 
@@ -133,14 +133,28 @@ export default function LiveDemoPage() {
           // In a real setup, this would come from a WebSocket; for now we use
           // the health endpoint person_count as a proxy
           const count = data.person_count ?? 0;
-          const mockDets: CameraDetection[] = [];
+          // Try to extract real pose/confidence from health payload (camera-service may include them)
+          const rawDetections: unknown[] = Array.isArray(data.detections) ? data.detections : [];
+          const dets: CameraDetection[] = [];
           for (let i = 0; i < count; i++) {
-            mockDets.push({
-              pose: 'standing', // camera-derived pose will come from real detections
-              confidence: 0.7,
+            const det = rawDetections[i];
+            const hasDet = det != null && typeof det === 'object';
+            dets.push({
+              pose: (hasDet && typeof (det as Record<string, unknown>).pose === 'string'
+                ? (det as Record<string, unknown>).pose as PoseLabel
+                : 'unknown'),
+              confidence: (hasDet && typeof (det as Record<string, unknown>).confidence === 'number'
+                ? (det as Record<string, unknown>).confidence as number
+                : 0.0),
+              bbox: hasDet && Array.isArray((det as Record<string, unknown>).bbox)
+                ? (det as Record<string, unknown>).bbox as number[]
+                : undefined,
+              floor_pos: hasDet && (det as Record<string, unknown>).floor_pos != null
+                ? (det as Record<string, unknown>).floor_pos as { x: number; y: number }
+                : undefined,
             });
           }
-          if (!cancelled) setCameraDetections(mockDets);
+          if (!cancelled) setCameraDetections(dets);
         }
       } catch {
         // Camera not available
