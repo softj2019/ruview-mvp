@@ -18,6 +18,7 @@ import { FigurePool, SKELETON_PAIRS } from './figure-pool.js';
 import { PoseSystem } from './pose-system.js';
 import { ConvergenceEngine } from './convergence-engine.js';
 import { ScenarioProps } from './scenario-props.js';
+import { SubcarrierManifold } from './subcarrier-manifold.js';
 import { HudController, DEFAULTS, SETTINGS_VERSION, PRESETS, SCENARIO_NAMES } from './hud-controller.js';
 
 // ---- Palette ----
@@ -119,6 +120,9 @@ class Observatory {
     this._buildPhaseConstellation();
     this._enhanceSignalFieldFloorZones();
     this._buildConvergenceEngine();
+    this._subcarrierManifold = new SubcarrierManifold(this._scene, null);
+    this._subcarrierManifold.group.position.set(5, 2.5, -3);
+    this._subcarrierManifold.group.scale.set(0.35, 0.35, 0.35);
 
     // Post-processing
     this._postProcessing = new PostProcessing(this._renderer, this._scene, this._camera);
@@ -797,6 +801,7 @@ class Observatory {
     this._updateVitalsOracle(data, elapsed);
     this._updatePhaseConstellation(data, elapsed);
     this._convergenceEngine.update(dt, elapsed, data);
+    this._subcarrierManifold.update(dt, elapsed, data);
     this._hud.tickFPS();
     this._hud.updateHUD(data, this._demoData);
     this._hud.updateSparkline(data);

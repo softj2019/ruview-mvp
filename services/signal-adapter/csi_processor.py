@@ -25,6 +25,12 @@ import numpy as np
 from scipy import signal as scipy_signal
 from scipy.interpolate import CubicSpline
 
+try:
+    from sensing import PresenceClassifier, RssiFeatureExtractor, RssiCollector
+    _SENSING_AVAILABLE = True
+except ImportError:
+    _SENSING_AVAILABLE = False
+
 
 @dataclass
 class ProcessedCSI:
@@ -52,6 +58,9 @@ class ProcessedCSI:
     gesture: str | None = None
     gesture_confidence: float = 0.0
     through_wall: bool = False
+    # Phase 3-9/3-10: sensing 패키지 분류 결과
+    presence_motion_level: str | None = None   # "absent" | "present_still" | "active"
+    presence_confidence: float = 0.0
 
 
 class WelfordStats:
@@ -159,6 +168,25 @@ class CSIProcessor:
         self._heart_sos = scipy_signal.butter(
             2, [0.8, 2.0], btype="band", fs=self.SAMPLE_RATE, output="sos"
         )
+
+        # Phase 3-9/3-10: sensing 패키지 통합
+        if _SENSING_AVAILABLE:
+            self._rssi_collector = RssiCollector(window_size=500)
+            self._rssi_feature_extractor = RssiFeatureExtractor(
+                sample_rate_hz=self.SAMPLE_RATE,
+                cusum_threshold=3.0,
+                cusum_drift=0.5,
+            )
+            self._presence_classifier = PresenceClassifier(
+                presence_variance_threshold=0.5,
+                motion_energy_threshold=0.1,
+                history_size=5,
+                hysteresis_ratio=0.6,
+            )
+        else:
+            self._rssi_collector = None
+            self._rssi_feature_extractor = None
+            self._presence_classifier = None
 
     def process(self, raw: dict[str, Any]) -> ProcessedCSI:
         """Process raw CSI frame through the full signal pipeline.
@@ -305,6 +333,31 @@ class CSIProcessor:
             motion_index=motion_index,
         )
 
+        # --- Step 11: RSSI 기반 재실 분류 (Phase 3-9/3-10) ---
+        presence_motion_level: str | None = None
+        presence_confidence: float = 0.0
+        rssi_val = raw.get("rssi", -100.0)
+        if _SENSING_AVAILABLE and self._rssi_collector is not None:
+            self._rssi_collector.push(device_id, rssi_val)
+            rssi_arr = self._rssi_collector.get_rssi_array(device_id)
+            if len(rssi_arr) >= 4:
+                features = self._rssi_feature_extractor.extract_from_array(rssi_arr)
+                sensing_result = self._presence_classifier.classify(
+                    features, device_id=device_id
+                )
+                presence_motion_level = sensing_result.motion_level.value
+                presence_confidence = sensing_result.confidence
+                # CUSUM 변화점 → event_engine 연동을 위해 로그 기록
+                if sensing_result.n_change_points > 0:
+                    import logging as _log
+                    _log.getLogger(__name__).debug(
+                        "CUSUM 변화점 감지 [%s]: %d개 (motion=%s, confidence=%.2f)",
+                        device_id,
+                        sensing_result.n_change_points,
+                        presence_motion_level,
+                        presence_confidence,
+                    )
+
         return ProcessedCSI(
             device_id=device_id,
             timestamp=timestamp,
@@ -330,6 +383,8 @@ class CSIProcessor:
             gesture=gesture,
             gesture_confidence=gesture_confidence,
             through_wall=through_wall,
+            presence_motion_level=presence_motion_level,
+            presence_confidence=presence_confidence,
         )
 
     # ------------------------------------------------------------------

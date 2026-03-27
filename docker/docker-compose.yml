@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   signal-adapter:
     build:
@@ -8,7 +6,9 @@ services:
     ports:
       - "8001:8001"
     env_file:
-      - .env
+      - ../.env
+    environment:
+      - RUVIEW_API_KEY=${RUVIEW_API_KEY:-}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
       interval: 30s
@@ -16,6 +16,23 @@ services:
       retries: 3
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - ruview
+
+  api-gateway:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api-gateway
+    ports:
+      - "8000:8000"
+    environment:
+      - SIGNAL_ADAPTER_URL=http://signal-adapter:8001
+    depends_on:
+      signal-adapter:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - ruview
 
   camera-service:
     build:
@@ -25,6 +42,7 @@ services:
       - "8002:8002"
     environment:
       - CAMERA_INDEX=0
+      - SIGNAL_ADAPTER_URL=http://signal-adapter:8001
     # Uncomment on Linux to pass webcam device:
     # devices:
     #   - /dev/video0:/dev/video0
@@ -32,6 +50,8 @@ services:
       signal-adapter:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - ruview
 
   web-monitor:
     build:
@@ -43,3 +63,54 @@ services:
       signal-adapter:
         condition: service_healthy
     restart: unless-stopped
+    networks:
+      - ruview
+
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    ports:
+      - "9090:9090"
+    volumes:
+      - ../infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infra/monitoring/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - ruview
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../infra/monitoring/grafana-dashboard.json:/etc/grafana/provisioning/dashboards/ruview.json:ro
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-ruview2026}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/ruview.json
+      - GF_DATASOURCES_DEFAULT_NAME=Prometheus
+      - GF_DATASOURCES_DEFAULT_TYPE=prometheus
+      - GF_DATASOURCES_DEFAULT_URL=http://prometheus:9090
+      - GF_DATASOURCES_DEFAULT_ACCESS=proxy
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - ruview
+
+networks:
+  ruview:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

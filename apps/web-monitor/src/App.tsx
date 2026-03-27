@@ -8,6 +8,8 @@ import SettingsPage from './pages/SettingsPage';
 import PoseFusionPage from './pages/PoseFusionPage';
 import HardwarePage from './pages/HardwarePage';
 import LiveDemoPage from './pages/LiveDemoPage';
+import ObservatoryPage from './pages/ObservatoryPage';
+import VizPage from './pages/VizPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore, type Device } from '@/stores/deviceStore';
@@ -16,6 +18,17 @@ import { useEventStore, type DetectionEvent } from '@/stores/eventStore';
 import { useSignalStore, type SignalPoint } from '@/stores/signalStore';
 import { useAlertStore, type AlertItem } from '@/stores/alertStore';
 import AlertToast from '@/components/alerts/AlertToast';
+
+/* ── WebSocket message discriminated union ── */
+type WSMessage =
+  | { type: 'init'; payload: { devices?: Device[]; zones?: Zone[] } }
+  | { type: 'event'; payload: DetectionEvent }
+  | { type: 'signal'; payload: SignalPoint }
+  | { type: 'device_update'; payload: { devices: Device[] } }
+  | { type: 'zone_update'; payload: { zones: Zone[] } }
+  | { type: 'vitals'; payload: unknown }
+  | { type: 'camera_detection'; payload: unknown }
+  | { type: 'alert'; payload: AlertItem };
 
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) return import.meta.env.VITE_WS_URL;
@@ -45,34 +58,37 @@ function DataProvider({ children }: { children: React.ReactNode }) {
 
   const handleMessage = useCallback(
     (data: unknown) => {
-      const msg = data as { type: string; payload: Record<string, unknown> };
-      if (!msg || !msg.type) return;
+      const raw = data as Record<string, unknown>;
+      if (!raw || typeof raw.type !== 'string') return;
+      const msg = raw as WSMessage;
       switch (msg.type) {
         case 'init':
-          if (msg.payload.devices) setDevices(msg.payload.devices as Device[]);
-          if (msg.payload.zones) setZones(msg.payload.zones as Zone[]);
+          if (msg.payload.devices) setDevices(msg.payload.devices);
+          if (msg.payload.zones) setZones(msg.payload.zones);
           break;
         case 'event':
-          addEvent(msg.payload as unknown as DetectionEvent);
+          addEvent(msg.payload);
           break;
         case 'signal':
-          addSignalPoint(msg.payload as unknown as SignalPoint);
+          addSignalPoint(msg.payload);
           break;
         case 'device_update':
-          if (msg.payload.devices) setDevices(msg.payload.devices as Device[]);
+          setDevices(msg.payload.devices);
           break;
         case 'zone_update':
-          if (msg.payload.zones) setZones(msg.payload.zones as Zone[]);
+          setZones(msg.payload.zones);
           break;
         case 'vitals':
-          // vitals payload does not match SignalPoint schema; observatory consumes it via its own WS
           break;
         case 'camera_detection':
-          // camera detections update zones via zone_update; no separate handling needed
           break;
         case 'alert':
-          addAlert(msg.payload as unknown as AlertItem);
+          addAlert(msg.payload);
           break;
+        default: {
+          const _exhaustive: never = msg;
+          console.warn('[WS] Unhandled message type:', (_exhaustive as Record<string, unknown>).type);
+        }
       }
     },
     [setDevices, setZones, addEvent, addSignalPoint, addAlert],
@@ -106,6 +122,8 @@ export default function App() {
           <Route path="/pose-fusion" element={<PoseFusionPage />} />
           <Route path="/hardware" element={<HardwarePage />} />
           <Route path="/live-demo" element={<LiveDemoPage />} />
+          <Route path="/observatory" element={<ObservatoryPage />} />
+          <Route path="/viz" element={<VizPage />} />
         </Route>
       </Routes>
     </DataProvider>

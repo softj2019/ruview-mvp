@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
-from .routes import devices, zones, events, health
+from .routes import devices, zones, events, health, pose, stream
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../../.env"))
 
@@ -35,6 +35,9 @@ app.include_router(health.router, tags=["health"])
 app.include_router(devices.router, prefix="/api/devices", tags=["devices"])
 app.include_router(zones.router, prefix="/api/zones", tags=["zones"])
 app.include_router(events.router, prefix="/api/events", tags=["events"])
+app.include_router(pose.router, prefix="/api/v1/pose", tags=["pose"])
+app.include_router(pose.models_router, prefix="/api/v1/models", tags=["models"])
+app.include_router(stream.router, prefix="/api/v1/stream", tags=["stream"])
 
 
 # WebSocket relay - forwards events from signal-adapter to frontend

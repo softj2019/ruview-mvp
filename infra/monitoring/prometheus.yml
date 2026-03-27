@@ -1,0 +1,70 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    project: 'ruview'
+    environment: 'production'
+
+# 알림 규칙 파일 로드
+rule_files:
+  - "alerting-rules.yml"
+
+# Alertmanager (선택 — 별도 배포 시 활성화)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ['alertmanager:9093']
+
+scrape_configs:
+  # Prometheus 자체 메트릭
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+    scrape_interval: 30s
+
+  # signal-adapter — CSI 처리 서비스 (port 8001)
+  - job_name: 'signal-adapter'
+    static_configs:
+      - targets: ['signal-adapter:8001']
+        labels:
+          service: 'signal-adapter'
+          component: 'csi-processor'
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # api-gateway — REST+WS 프록시 (port 8000)
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+        labels:
+          service: 'api-gateway'
+          component: 'proxy'
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # camera-service — YOLOv8-pose 감지 (port 8002)
+  - job_name: 'camera-service'
+    static_configs:
+      - targets: ['camera-service:8002']
+        labels:
+          service: 'camera-service'
+          component: 'yolo'
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # web-monitor 헬스체크 (Nginx 정적 서빙, blackbox 프로브)
+  - job_name: 'web-monitor-health'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - 'http://web-monitor:80/health'
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 'blackbox-exporter:9115'
+    scrape_interval: 30s

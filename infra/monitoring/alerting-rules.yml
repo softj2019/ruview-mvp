@@ -1,0 +1,188 @@
+groups:
+  # ─────────────────────────────────────────────────────────────
+  # 재실/낙상 감지 — 핵심 비즈니스 알림
+  # ─────────────────────────────────────────────────────────────
+  - name: ruview.sensing
+    rules:
+      # 낙상 감지 이벤트
+      - alert: FallDetected
+        expr: increase(ruview_fall_events_total[1m]) > 0
+        for: 0s
+        labels:
+          severity: critical
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "낙상 감지됨"
+          description: "지난 1분 내 낙상 이벤트 {{ $value }}건이 감지되었습니다. 즉시 확인하세요."
+
+      # 높은 심박수 (BPM > 120)
+      - alert: HighHeartRate
+        expr: ruview_heart_rate_bpm > 120
+        for: 2m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "높은 심박수 감지"
+          description: "노드 {{ $labels.node_id }}에서 심박수 {{ $value }} BPM이 2분간 지속되었습니다."
+
+      # 낮은 심박수 (BPM < 40, 정상 성인 기준)
+      - alert: LowHeartRate
+        expr: ruview_heart_rate_bpm > 0 and ruview_heart_rate_bpm < 40
+        for: 3m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "낮은 심박수 감지"
+          description: "노드 {{ $labels.node_id }}에서 심박수 {{ $value }} BPM이 3분간 지속되었습니다."
+
+      # 무호흡 의심 (호흡수 0, 재실 중)
+      - alert: ApneaSuspected
+        expr: ruview_breathing_rate_rpm == 0 and ruview_presence_detected == 1
+        for: 1m
+        labels:
+          severity: critical
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "무호흡 의심"
+          description: "노드 {{ $labels.node_id }}: 재실 중이나 호흡수가 0 RPM입니다."
+
+  # ─────────────────────────────────────────────────────────────
+  # ESP32 노드 상태
+  # ─────────────────────────────────────────────────────────────
+  - name: ruview.nodes
+    rules:
+      # 노드 오프라인 (UDP 패킷 수신 없음)
+      - alert: NodeOffline
+        expr: increase(ruview_csi_packets_received_total[2m]) == 0
+        for: 2m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "ESP32 노드 오프라인"
+          description: "노드 {{ $labels.node_id }}에서 2분간 CSI 패킷이 수신되지 않았습니다."
+
+      # 모든 노드 오프라인
+      - alert: AllNodesOffline
+        expr: sum(increase(ruview_csi_packets_received_total[2m])) == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "모든 ESP32 노드 오프라인"
+          description: "전체 CSI 수신이 2분간 중단되었습니다. 네트워크 및 펌웨어를 확인하세요."
+
+      # CSI 패킷 손실률 높음 (> 20%)
+      - alert: HighPacketLoss
+        expr: |
+          (
+            rate(ruview_csi_packets_dropped_total[5m]) /
+            (rate(ruview_csi_packets_received_total[5m]) + rate(ruview_csi_packets_dropped_total[5m]))
+          ) > 0.2
+        for: 3m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "높은 CSI 패킷 손실률"
+          description: "노드 {{ $labels.node_id }}: 패킷 손실률 {{ $value | humanizePercentage }}."
+
+  # ─────────────────────────────────────────────────────────────
+  # 서비스 가용성
+  # ─────────────────────────────────────────────────────────────
+  - name: ruview.availability
+    rules:
+      # signal-adapter 다운
+      - alert: SignalAdapterDown
+        expr: up{job="signal-adapter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "signal-adapter 서비스 다운"
+          description: "signal-adapter:8001이 1분간 응답하지 않습니다."
+
+      # api-gateway 다운
+      - alert: ApiGatewayDown
+        expr: up{job="api-gateway"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: api-gateway
+          team: ops
+        annotations:
+          summary: "api-gateway 서비스 다운"
+          description: "api-gateway:8000이 1분간 응답하지 않습니다."
+
+      # API 오류율 높음 (5xx > 5%)
+      - alert: HighApiErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{job="api-gateway", status=~"5.."}[5m])) /
+            sum(rate(http_requests_total{job="api-gateway"}[5m]))
+          ) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+          service: api-gateway
+          team: ops
+        annotations:
+          summary: "API 오류율 높음"
+          description: "api-gateway 오류율 {{ $value | humanizePercentage }} (5분 평균)."
+
+      # WebSocket 연결 수 0 (서비스 이상 징후)
+      - alert: NoWebSocketClients
+        expr: ruview_ws_clients_connected == 0
+        for: 5m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "WebSocket 클라이언트 없음"
+          description: "5분간 연결된 WebSocket 클라이언트가 없습니다."
+
+  # ─────────────────────────────────────────────────────────────
+  # 처리 파이프라인 성능
+  # ─────────────────────────────────────────────────────────────
+  - name: ruview.performance
+    rules:
+      # CSI 처리 지연 높음 (p95 > 500ms)
+      - alert: HighCsiProcessingLatency
+        expr: |
+          histogram_quantile(0.95,
+            rate(ruview_csi_processing_duration_seconds_bucket[5m])
+          ) > 0.5
+        for: 3m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "CSI 처리 지연 높음"
+          description: "CSI 처리 p95 지연 {{ $value }}s (임계값 500ms)."
+
+      # signal-adapter 메모리 사용 높음
+      - alert: SignalAdapterHighMemory
+        expr: |
+          process_resident_memory_bytes{job="signal-adapter"} > 512 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "signal-adapter 메모리 사용 초과"
+          description: "현재 메모리 사용 {{ $value | humanize1024 }}B (임계값 512MiB)."

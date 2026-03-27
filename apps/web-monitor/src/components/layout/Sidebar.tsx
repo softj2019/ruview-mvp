@@ -1,9 +1,9 @@
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play } from 'lucide-react';
+import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play, Globe, BarChart2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { StatusDot } from '@/components/ui/StatusDot';
 
-const navItems = [
+const navItems: { to: string; label: string; icon: typeof LayoutDashboard; external?: boolean }[] = [
   { to: '/', label: '대시보드', icon: LayoutDashboard },
   { to: '/devices', label: '디바이스', icon: Cpu },
   { to: '/events', label: '이벤트', icon: Bell },
@@ -11,6 +11,8 @@ const navItems = [
   { to: '/pose-fusion', label: '포즈 융합', icon: GitMerge },
   { to: '/hardware', label: '하드웨어', icon: HardDrive },
   { to: '/live-demo', label: '라이브 데모', icon: Play },
+  { to: '/observatory', label: '3D 관측소', icon: Globe },
+  { to: '/viz', label: '시각화', icon: BarChart2 },
   { to: '/settings', label: '설정', icon: Settings },
 ];
 
@@ -28,19 +30,24 @@ export default function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 space-y-1 px-3 py-4">
-        {navItems.map(({ to, label, icon: Icon }) => {
+        {navItems.map(({ to, label, icon: Icon, external }) => {
           const active = location.pathname === to;
+          const cls = cn(
+            'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors hover:bg-gray-800/50',
+            active
+              ? 'text-cyan-400'
+              : 'text-gray-400 hover:text-gray-200',
+          );
+          if (external) {
+            return (
+              <a key={to} href={to} className={cls}>
+                <Icon className="h-4 w-4" />
+                {label}
+              </a>
+            );
+          }
           return (
-            <Link
-              key={to}
-              to={to}
-              className={cn(
-                'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors',
-                active
-                  ? 'bg-cyan-500/10 text-cyan-400'
-                  : 'text-gray-400 hover:bg-gray-800/50 hover:text-gray-200',
-              )}
-            >
+            <Link key={to} to={to} className={cls}>
               <Icon className="h-4 w-4" />
               {label}
             </Link>
@@ -51,7 +58,7 @@ export default function Sidebar() {
       {/* Footer */}
       <div className="border-t border-gray-800 px-5 py-3">
         <p className="text-[10px] text-gray-600">RuView MVP v0.1.0</p>
-        <p className="text-[10px] text-gray-600">Mock 시뮬레이션 모드</p>
+        <p className="text-[10px] text-gray-600">ESP32 Hardware Mode</p>
       </div>
     </aside>
   );
