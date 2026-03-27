@@ -8,7 +8,8 @@ import { Card, CardContent, CardHeader } from '@/components/ui/Card';
 import { Badge } from '@/components/ui/Badge';
 import { useDeviceStore } from '@/stores/deviceStore';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import PoseDetectionCanvas, { type Person } from '@/components/camera/PoseDetectionCanvas';
+import PoseDetectionCanvas from '@/components/camera/PoseDetectionCanvas';
+import type { PoseData } from '@/types/pose';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -152,7 +153,7 @@ export default function LiveDemoPage() {
   const [csiTimestamp, setCsiTimestamp] = useState<number>(Date.now());
   const [connState, setConnState] = useState<ConnState>('disconnected');
   const [frameCount, setFrameCount] = useState(0);
-  const [csiPersons, setCsiPersons] = useState<Person[]>([]);
+  const [csiPersons, setCsiPersons] = useState<PoseData[]>([]);
   const [debugMode, setDebugMode] = useState(false);
   const agreementHistoryRef = useRef<Map<string, boolean[]>>(new Map());
 
@@ -167,13 +168,12 @@ export default function LiveDemoPage() {
       setFrameCount((n) => n + 1);
       setCsiTimestamp(Date.now());
 
-      // Build synthetic Person list from device data for PoseDetectionCanvas
+      // Build synthetic PoseData list from device data for PoseDetectionCanvas
       if (Array.isArray(msg.devices)) {
-        const persons: Person[] = (msg.devices as Array<Record<string, unknown>>)
+        const persons: PoseData[] = (msg.devices as Array<Record<string, unknown>>)
           .filter((d) => d.motion_energy != null)
           .map((d, i) => ({
-            id: String(d.id ?? i),
-            pose: poseFromEnergy(d.motion_energy as number | undefined),
+            personId: String(d.id ?? i),
             confidence: poseConfidence(d.motion_energy as number | undefined),
             keypoints: generatePlaceholderKeypoints(),
           }));
@@ -339,10 +339,10 @@ export default function LiveDemoPage() {
               {csiPersons.length > 0 && (
                 <div className="mb-4 overflow-hidden rounded-lg border border-gray-800 bg-black">
                   <PoseDetectionCanvas
-                    persons={csiPersons}
+                    poses={csiPersons}
                     width={480}
                     height={320}
-                    showTrail={debugMode}
+                    trailLength={debugMode ? 15 : 0}
                   />
                 </div>
               )}
@@ -510,18 +510,18 @@ export default function LiveDemoPage() {
 // ─── Helpers (private) ────────────────────────────────────────────────────────
 
 /** CSI 신호로부터 COCO-17 keypoint placeholder 생성 (시각화용) */
-function generatePlaceholderKeypoints(): Person['keypoints'] {
+function generatePlaceholderKeypoints(): import('@/types/pose').Keypoint17[] {
   // 중심(0.5, 0.5) 주변에 서 있는 사람 형태의 기본값
-  const pts: [number, number][] = [
-    [0.5, 0.15],  // 코
-    [0.48, 0.13], [0.52, 0.13], // 눈
-    [0.46, 0.14], [0.54, 0.14], // 귀
-    [0.42, 0.28], [0.58, 0.28], // 어깨
-    [0.38, 0.42], [0.62, 0.42], // 팔꿈치
-    [0.36, 0.55], [0.64, 0.55], // 손목
-    [0.44, 0.58], [0.56, 0.58], // 엉덩이
-    [0.43, 0.75], [0.57, 0.75], // 무릎
-    [0.43, 0.90], [0.57, 0.90], // 발목
+  const pts: [number, number, string][] = [
+    [0.5, 0.15, 'nose'],
+    [0.48, 0.13, 'left_eye'], [0.52, 0.13, 'right_eye'],
+    [0.46, 0.14, 'left_ear'], [0.54, 0.14, 'right_ear'],
+    [0.42, 0.28, 'left_shoulder'], [0.58, 0.28, 'right_shoulder'],
+    [0.38, 0.42, 'left_elbow'], [0.62, 0.42, 'right_elbow'],
+    [0.36, 0.55, 'left_wrist'], [0.64, 0.55, 'right_wrist'],
+    [0.44, 0.58, 'left_hip'], [0.56, 0.58, 'right_hip'],
+    [0.43, 0.75, 'left_knee'], [0.57, 0.75, 'right_knee'],
+    [0.43, 0.90, 'left_ankle'], [0.57, 0.90, 'right_ankle'],
   ];
-  return pts.map(([x, y]) => ({ x, y, confidence: 0.6 }));
+  return pts.map(([x, y, name]) => ({ x, y, score: 0.6, name }));
 }

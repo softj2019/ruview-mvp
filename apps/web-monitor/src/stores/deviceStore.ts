@@ -29,18 +29,37 @@ export interface Device {
 interface DeviceState {
   devices: Device[];
   selectedId: string | null;
+  nightMode: boolean;
+  autoNightMode: boolean;
+  nightModeStart: number;
+  nightModeEnd: number;
   setDevices: (devices: Device[]) => void;
   updateDevice: (id: string, partial: Partial<Device>) => void;
   selectDevice: (id: string | null) => void;
+  toggleNightMode: () => void;
 }
 
 export const useDeviceStore = create<DeviceState>((set) => ({
   devices: [],
   selectedId: null,
+  nightMode: false,
+  autoNightMode: false,
+  nightModeStart: 22,
+  nightModeEnd: 6,
   setDevices: (devices) => set({ devices }),
   updateDevice: (id, partial) =>
     set((state) => ({
       devices: state.devices.map((d) => (d.id === id ? { ...d, ...partial } : d)),
     })),
   selectDevice: (id) => set({ selectedId: id }),
+  toggleNightMode: () =>
+    set((state) => {
+      const next = !state.nightMode;
+      if (next) {
+        document.documentElement.classList.add('night-mode');
+      } else {
+        document.documentElement.classList.remove('night-mode');
+      }
+      return { nightMode: next };
+    }),
 }));

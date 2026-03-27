@@ -282,7 +282,7 @@ function ZoneOccupancySummary() {
       <CardHeader>존별 점유율 요약</CardHeader>
       <CardContent>
         {/* Summary stats */}
-        <div className="grid grid-cols-4 gap-3 mb-4">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
           {stats.map((s) => (
             <div key={s.label} className="text-center">
               <div className={`text-2xl font-bold ${s.color}`}>{s.value}</div>
@@ -354,29 +354,23 @@ export default function DashboardPage() {
       <SystemStatus />
 
       {/* Floor + Camera + Observatory */}
-      <div className="grid grid-cols-12 gap-6">
-        <div className="col-span-12 lg:col-span-5">
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
+        <div className="lg:col-span-5">
           <FloorView />
         </div>
-        <div className="col-span-12 lg:col-span-4">
+        <div className="lg:col-span-4">
           <CameraFeed />
         </div>
-        <div className="col-span-12 lg:col-span-3">
+        <div className="lg:col-span-3">
           <ObservatoryMini />
         </div>
       </div>
 
       {/* Alerts + Devices + Signal */}
-      <div className="grid grid-cols-12 gap-6">
-        <div className="col-span-12 md:col-span-4">
-          <AlertPanel />
-        </div>
-        <div className="col-span-12 md:col-span-4">
-          <DeviceList />
-        </div>
-        <div className="col-span-12 md:col-span-4">
-          <SignalChart />
-        </div>
+      <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+        <AlertPanel />
+        <DeviceList />
+        <SignalChart />
       </div>
     </div>
   );
