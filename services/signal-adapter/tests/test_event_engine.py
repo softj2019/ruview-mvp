@@ -245,3 +245,92 @@ class TestPresenceStationary:
         csi = make_csi(motion_index=10.0)
         events = engine.evaluate(csi)
         assert events[0].zone == "default"
+
+
+# ---------------------------------------------------------------------------
+# High breathing rate detection
+# ---------------------------------------------------------------------------
+
+class TestHighBreathingRateDetection:
+    def test_high_br_event_above_max(self, engine):
+        csi = make_csi(breathing_rate=EventEngine.BREATHING_RATE_MAX + 1.0)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "high_breathing_rate" in types
+
+    def test_no_high_br_event_within_range(self, engine):
+        csi = make_csi(breathing_rate=20.0)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "high_breathing_rate" not in types
+
+    def test_no_high_br_event_when_none(self, engine):
+        csi = make_csi(breathing_rate=None)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "high_breathing_rate" not in types
+
+    def test_high_br_event_severity_is_warning(self, engine):
+        csi = make_csi(breathing_rate=35.0)
+        events = engine.evaluate(csi)
+        br_events = [e for e in events if e.type == "high_breathing_rate"]
+        assert len(br_events) == 1
+        assert br_events[0].severity == "warning"
+
+    def test_high_br_metadata_contains_breathing_rate(self, engine):
+        csi = make_csi(breathing_rate=34.5)
+        events = engine.evaluate(csi)
+        br_events = [e for e in events if e.type == "high_breathing_rate"]
+        assert "breathing_rate" in br_events[0].metadata
+        assert br_events[0].metadata["breathing_rate"] == pytest.approx(34.5)
+
+    def test_no_high_br_at_exact_threshold(self, engine):
+        csi = make_csi(breathing_rate=EventEngine.BREATHING_RATE_MAX)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "high_breathing_rate" not in types
+
+
+# ---------------------------------------------------------------------------
+# Low presence noise detection
+# ---------------------------------------------------------------------------
+
+class TestLowPresenceNoiseDetection:
+    def test_low_presence_event_below_threshold(self, engine):
+        csi = make_csi(presence_score=0.10)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "low_presence_noise" in types
+
+    def test_no_low_presence_event_above_threshold(self, engine):
+        csi = make_csi(presence_score=EventEngine.LOW_PRESENCE_THRESHOLD + 0.1)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "low_presence_noise" not in types
+
+    def test_low_presence_event_severity_is_info(self, engine):
+        csi = make_csi(presence_score=0.05)
+        events = engine.evaluate(csi)
+        lp_events = [e for e in events if e.type == "low_presence_noise"]
+        assert len(lp_events) == 1
+        assert lp_events[0].severity == "info"
+
+    def test_low_presence_metadata_contains_score(self, engine):
+        csi = make_csi(presence_score=0.111)
+        events = engine.evaluate(csi)
+        lp_events = [e for e in events if e.type == "low_presence_noise"]
+        assert "presence_score" in lp_events[0].metadata
+        assert lp_events[0].metadata["presence_score"] == pytest.approx(0.111)
+
+    def test_no_low_presence_at_exact_threshold(self, engine):
+        csi = make_csi(presence_score=EventEngine.LOW_PRESENCE_THRESHOLD)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "low_presence_noise" not in types
+
+    def test_no_low_presence_when_score_is_zero(self, engine):
+        # presence_score=0.0 means empty room / no signal — should NOT fire
+        csi = make_csi(presence_score=0.0)
+        events = engine.evaluate(csi)
+        types = [e.type for e in events]
+        assert "low_presence_noise" not in types

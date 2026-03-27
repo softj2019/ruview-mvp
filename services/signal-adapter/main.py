@@ -736,8 +736,16 @@ class SignalAdapterRuntime:
             device["hrv"] = processed.hrv
 
         # Server-side vitals extraction (supplement firmware vitals)
+        # csi_breathing_bpm: clamp to 6–30 BPM and mask when presence is too low
+        # to prevent raw firmware / out-of-range values from reaching the UI
+        # (GitHub #9).
         if processed.breathing_rate is not None:
-            device["csi_breathing_bpm"] = processed.breathing_rate
+            _br = processed.breathing_rate
+            if processed.presence_score < 0.15:
+                _br = 0.0   # no reliable presence — mask the value
+            elif _br != 0.0:
+                _br = max(6.0, min(30.0, _br))
+            device["csi_breathing_bpm"] = _br
         if processed.heart_rate is not None:
             device["csi_heart_rate"] = processed.heart_rate
         # Use server vitals as fallback when firmware vitals unavailable

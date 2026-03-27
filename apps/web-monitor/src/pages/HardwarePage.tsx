@@ -283,7 +283,8 @@ function AntennaArrayPanel({ deviceId }: { deviceId: string | null }) {
 // ---------------------------------------------------------------------------
 
 const CH_SEQUENCE = [1, 6, 11] as const;
-const DWELL_MS = 50;
+const DWELL_MS = 50;           // 펌웨어 실제 dwell (sdkconfig)
+const UI_DWELL_MS = 800;       // UI 표시용 속도 (눈으로 확인 가능)
 
 function ChannelHoppingStatus({ deviceOnline }: { deviceOnline: boolean }) {
   const [activeIdx, setActiveIdx] = useState(0);
@@ -292,7 +293,7 @@ function ChannelHoppingStatus({ deviceOnline }: { deviceOnline: boolean }) {
     if (!deviceOnline) return;
     const id = setInterval(() => {
       setActiveIdx((prev) => (prev + 1) % CH_SEQUENCE.length);
-    }, DWELL_MS);
+    }, UI_DWELL_MS);
     return () => clearInterval(id);
   }, [deviceOnline]);
 

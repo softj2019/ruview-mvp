@@ -119,7 +119,7 @@ class CSIProcessor:
     TOP_K = 8               # Top-K subcarriers to track
     SAMPLE_RATE = 20.0      # Approximate CSI frame rate (Hz)
     MIN_FRAMES_VITALS = 64  # Minimum frames before BPM estimation
-    CORR_THRESHOLD = 0.7    # Correlation threshold for same-person clustering
+    CORR_THRESHOLD = 0.85   # Correlation threshold for same-person clustering (0.70→0.85: multipath 오탐 감소)
 
     # Hampel filter config (ported from wifi-densepose-signal/hampel.rs)
     HAMPEL_HALF_WINDOW = 3  # Half-window size (total = 2*3+1 = 7 samples)
@@ -276,10 +276,12 @@ class CSIProcessor:
         presence_score = float(np.mean(top_k_var)) if top_k_var else 0.0
 
         # Vital signs extraction
+        # presence_score < 0.15 = 빈방 수준 노이즈 → 바이탈 추출 신뢰 불가, 스킵
+        MIN_PRESENCE_FOR_VITALS = 0.15
         breathing_rate = None
         heart_rate = None
         history = self._phase_history.get(device_id)
-        if history and len(history) >= self.MIN_FRAMES_VITALS:
+        if history and len(history) >= self.MIN_FRAMES_VITALS and presence_score >= MIN_PRESENCE_FOR_VITALS:
             phase_arr = np.array(list(history))
             _br_raw = self._extract_breathing(phase_arr)
             # 범위 클램프: 정상 호흡 6~30 BPM 외 값은 0.0 반환 (신뢰 불가 신호)
@@ -958,8 +960,11 @@ class CSIProcessor:
             clusters.setdefault(root, []).append(i)
 
         # Step 3: Extract breathing rate per cluster
+        # 최소 2개 subcarrier가 묶인 클러스터만 유효 (singleton = multipath 노이즈)
         per_person_breathing: list[float] = []
         for members in clusters.values():
+            if len(members) < 2:
+                continue  # singleton cluster → multipath artifact, skip
             # Average the filtered signals within the cluster
             cluster_signal = np.mean(filtered[members], axis=0)
             bpm = self._extract_breathing(cluster_signal)
@@ -1205,10 +1210,50 @@ class CSIProcessor:
         return [idx for idx, _ in variances[:self.TOP_K]]
 
     def _get_top_k_variance(self, device_id: str) -> list[float]:
-        """Get variance values for top-K subcarriers."""
+        """Get variance values for top-K subcarriers.
+
+        During Welford warmup (count < MIN_FRAMES_VITALS) the per-subcarrier
+        variance estimate is unreliable because the m2 accumulator needs enough
+        samples to stabilise (variance = m2 / (count-1)).  In that phase we
+        fall back to the rolling std of the amplitude buffer so that
+        presence_score does not collapse to near-zero right after a restart.
+        """
         indices = self._top_k.get(device_id, [])
         stats = self._subcarrier_var.get(device_id, [])
-        return [stats[i].variance() for i in indices if i < len(stats)]
+        if not indices or not stats:
+            return []
+
+        # Check if enough Welford samples have been accumulated.
+        # Use the first tracked subcarrier as the representative count.
+        welford_ready = stats[0].count >= self.MIN_FRAMES_VITALS if stats else False
+
+        if welford_ready:
+            return [stats[i].variance() for i in indices if i < len(stats)]
+
+        # Fallback: compute per-subcarrier variance from the amplitude buffer
+        # (last BUFFER_SIZE frames stored as deque of lists).
+        buf = self._amplitude_buffer.get(device_id)
+        if buf is None or len(buf) < 5:
+            # Buffer not ready either — return Welford estimates as-is
+            return [stats[i].variance() for i in indices if i < len(stats)]
+
+        frames = list(buf)
+        min_len = min(len(f) for f in frames)
+        if min_len == 0:
+            return [stats[i].variance() for i in indices if i < len(stats)]
+
+        # Build (n_frames × n_sc) array and compute per-subcarrier variance
+        arr = np.array([f[:min_len] for f in frames], dtype=np.float64)
+        sc_var = np.var(arr, axis=0, ddof=1)  # shape (min_len,)
+
+        result = []
+        for i in indices:
+            if i < len(stats):
+                if i < len(sc_var):
+                    result.append(float(sc_var[i]))
+                else:
+                    result.append(stats[i].variance())
+        return result
 
     def _calc_motion_index(self, device_id: str) -> float:
         buf = self._amplitude_buffer.get(device_id)

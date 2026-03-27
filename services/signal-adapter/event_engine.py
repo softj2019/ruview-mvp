@@ -29,12 +29,38 @@ class EventEngine:
     PRESENCE_THRESHOLD = 0.5
     FALL_THRESHOLD = 8.0
     SIGNAL_WEAK_THRESHOLD = -80.0
+    BREATHING_RATE_MAX = 30.0       # bpm — adult normal upper limit
+    LOW_PRESENCE_THRESHOLD = 0.15  # presence_score below this = noise level
 
     def __init__(self):
         self._state: dict[str, str] = {}  # device_id -> last state
 
     def evaluate(self, csi: ProcessedCSI) -> list[DetectionEvent]:
         events: list[DetectionEvent] = []
+
+        # High breathing rate check
+        if csi.breathing_rate is not None and csi.breathing_rate > self.BREATHING_RATE_MAX:
+            events.append(
+                DetectionEvent(
+                    type="high_breathing_rate",
+                    severity="warning",
+                    device_id=csi.device_id,
+                    confidence=0.8,
+                    metadata={"breathing_rate": csi.breathing_rate},
+                )
+            )
+
+        # Low presence (noise level) check — excludes true-zero (no signal / empty room)
+        if 0 < csi.presence_score < self.LOW_PRESENCE_THRESHOLD:
+            events.append(
+                DetectionEvent(
+                    type="low_presence_noise",
+                    severity="info",
+                    device_id=csi.device_id,
+                    confidence=0.7,
+                    metadata={"presence_score": csi.presence_score},
+                )
+            )
 
         # Signal weak check
         if csi.rssi < self.SIGNAL_WEAK_THRESHOLD:
