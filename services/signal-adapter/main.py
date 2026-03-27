@@ -720,9 +720,12 @@ class SignalAdapterRuntime:
         device["presence_score"] = processed.presence_score
 
         # Multi-person separation from CSI subcarrier clustering
+        # estimated_persons=0 일 때도 반드시 덮어써야 이전 프레임 값이 잔존하지 않음
+        device["csi_estimated_persons"] = processed.estimated_persons
         if processed.estimated_persons > 0:
-            device["csi_estimated_persons"] = processed.estimated_persons
             device["csi_per_person_breathing"] = processed.per_person_breathing
+        else:
+            device.pop("csi_per_person_breathing", None)
 
         # Body Velocity Profile (BVP)
         if processed.velocity_profile is not None:
