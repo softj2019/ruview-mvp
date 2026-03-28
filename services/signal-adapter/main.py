@@ -746,23 +746,26 @@ class SignalAdapterRuntime:
             device["hrv"] = processed.hrv
 
         # Server-side vitals extraction (supplement firmware vitals)
-        # csi_breathing_bpm: clamp to 6–30 BPM and mask when presence is too low
-        # to prevent raw firmware / out-of-range values from reaching the UI
-        # (GitHub #9).
-        if processed.breathing_rate is not None:
-            _br = processed.breathing_rate
-            if processed.presence_score < 0.15:
-                _br = 0.0   # no reliable presence — mask the value
-            elif _br != 0.0:
-                _br = max(6.0, min(30.0, _br))
-            device["csi_breathing_bpm"] = _br
-        if processed.heart_rate is not None:
-            device["csi_heart_rate"] = processed.heart_rate
-        # Use server vitals as fallback when firmware vitals unavailable
-        if device.get("breathing_bpm", 0) == 0 and processed.breathing_rate:
-            device["breathing_bpm"] = processed.breathing_rate
-        if device.get("heart_rate", 0) == 0 and processed.heart_rate:
-            device["heart_rate"] = processed.heart_rate
+        # GitHub #7: presence < 0.15 = 노이즈 구간 → 이전 프레임 잔류값 초기화
+        # (processed.breathing_rate/heart_rate이 None이면 if 블록 자체가 실행되지 않아
+        #  stale 값이 device dict에 남는 문제 수정)
+        if processed.presence_score < 0.15:
+            device["csi_breathing_bpm"] = 0.0
+            device["csi_heart_rate"] = 0.0
+        else:
+            # csi_breathing_bpm: clamp to 6–30 BPM (GitHub #9)
+            if processed.breathing_rate is not None:
+                _br = processed.breathing_rate
+                if _br != 0.0:
+                    _br = max(6.0, min(30.0, _br))
+                device["csi_breathing_bpm"] = _br
+            if processed.heart_rate is not None:
+                device["csi_heart_rate"] = processed.heart_rate
+            # Use server vitals as fallback when firmware vitals unavailable
+            if device.get("breathing_bpm", 0) == 0 and processed.breathing_rate:
+                device["breathing_bpm"] = processed.breathing_rate
+            if device.get("heart_rate", 0) == 0 and processed.heart_rate:
+                device["heart_rate"] = processed.heart_rate
 
         # Recompute presence for all zones
         self._recompute_presence_count()
@@ -800,8 +803,13 @@ class SignalAdapterRuntime:
         device["presence_score"] = presence_score
         device["motion_energy"] = motion_energy
         # GitHub #9: 서버측 필터링 — 정상 범위(6~30 BPM) 외 firmware 값은 0으로 마스킹
-        device["breathing_bpm"] = breathing_bpm if 6.0 <= breathing_bpm <= 30.0 else 0.0
-        device["heart_rate"] = heart_rate
+        # GitHub #7: presence < 0.15 = 노이즈 구간 → firmware vitals 억제
+        if presence_score >= 0.15:
+            device["breathing_bpm"] = breathing_bpm if 6.0 <= breathing_bpm <= 30.0 else 0.0
+            device["heart_rate"] = heart_rate
+        else:
+            device["breathing_bpm"] = 0.0
+            device["heart_rate"] = 0.0
 
         # Assign device to closest zone
         device_zone_id = assign_device_zone(device, self.zones)
@@ -817,10 +825,11 @@ class SignalAdapterRuntime:
         await self.broadcast_zones()
 
         # Broadcast vitals to all WS clients (observatory, dashboard)
+        # presence < 0.15 구간에서는 이미 device dict에 0.0이 저장된 값을 사용
         vitals_payload = {
             "device_id": self.device_key(node_id),
-            "breathing_rate_bpm": breathing_bpm,
-            "heart_rate_bpm": heart_rate,
+            "breathing_rate_bpm": device["breathing_bpm"],
+            "heart_rate_bpm": device["heart_rate"],
             "motion_energy": motion_energy,
             "presence_score": presence_score,
             "n_persons": n_persons,

@@ -146,8 +146,38 @@ def analyze():
     # ── 4. GitHub 오픈 이슈 ─────────────────────────────────────────
     open_issues = gh_open_issues()
 
-    # ── 5. 보고서 생성 ─────────────────────────────────────────────
+    # ── 5. 동적 권장 조치 생성 ──────────────────────────────────────
     nl = "\n"
+    actions = []
+    offline_ids = [d.get("id") for d in devs if d.get("status") != "online"]
+    low_presence_nodes = [d.get("id") for d in devs
+                          if d.get("status") == "online"
+                          and float(d.get("presence_score") or 0) < 0.15]
+
+    if offline_ids:
+        for oid in offline_ids:
+            actions.append(f"**즉시**: {oid} 전원/WiFi 확인 및 재부팅")
+
+    fall_samples = int(fstats.get("total_samples", 0))
+    if fall_samples < 150:
+        remaining = 150 - fall_samples
+        actions.append(
+            f"**금일 중**: 낙상 시뮬레이션 데이터 수집 {remaining}건 (POST /api/fall/record)"
+        )
+
+    if len(low_presence_nodes) >= 3:
+        actions.append("**주말 중**: AP 채널 고정, 노드 높이 1.2~1.5m 재조정 — "
+                       f"저신뢰 노드 {len(low_presence_nodes)}개")
+
+    if not lreport.get("calibration_complete") or len(low_presence_nodes) >= 4:
+        actions.append("**재캘리브레이션**: 노드 정리 후 `POST /api/calibration/empty-room`")
+
+    if not actions:
+        actions.append("이상 없음 — 추가 조치 불필요 ✅")
+
+    actions_text = nl.join(f"{i+1}. {a}" for i, a in enumerate(actions))
+
+    # ── 6. 보고서 생성 ─────────────────────────────────────────────
     report = f"""# ruView 정기 모니터링 리포트
 **시각**: {ts}
 **서비스**: signal-adapter={health.get('mode','?')} | camera={'✅' if cam_ok else '❌'} | 노드={len(online)}/6 온라인
@@ -188,10 +218,7 @@ def analyze():
 
 ## 권장 조치
 
-1. **즉시**: node-6 전원/WiFi 확인 및 재부팅
-2. **금일 중**: 낙상 시뮬레이션 데이터 수집 (POST /api/fall/record)
-3. **주말 중**: AP 채널 고정, 노드 높이 1.2~1.5m 재조정
-4. **재캘리브레이션**: 노드 정리 후 `POST /api/calibration/empty-room`
+{actions_text}
 """
     return report, issues_found, ts
 
