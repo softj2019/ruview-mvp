@@ -111,8 +111,9 @@ def analyze():
         me   = float(d.get("motion_energy") or 0)
         np_  = int(d.get("csi_estimated_persons") or 0)
         cpc  = float(d.get("csi_pose_confidence") or 0)
-        br   = float(d.get("breathing_bpm") or d.get("csi_breathing_bpm") or 0)
-        hr   = float(d.get("heart_rate") or d.get("csi_heart_rate") or 0)
+        # GitHub #11: csi 필드 우선 (Welford 가드 적용된 값)
+        br   = float(d.get("csi_breathing_bpm") or d.get("breathing_bpm") or 0)
+        hr   = float(d.get("csi_heart_rate") or d.get("heart_rate") or 0)
         zone = d.get("zone_id", "?")
 
         # 이상 감지

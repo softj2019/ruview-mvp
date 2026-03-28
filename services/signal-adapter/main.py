@@ -426,7 +426,9 @@ class SignalAdapterRuntime:
             dev["zone_id"] = zone_id
 
             # Count presence signals per zone
-            if dev.get("n_persons", 0) > 0:
+            # GitHub #11: firmware n_persons는 Welford z-score 확인 시에만 신뢰
+            # (Welford 미완료 or z=0 구간에서 펌웨어 오탐 방지)
+            if dev.get("n_persons", 0) > 0 and dev.get("_presence_z", 0) > 0:
                 zone_counts[zone_id] += dev["n_persons"]
             elif dev.get("_presence_z", 0) > 0:
                 zone_counts[zone_id] += 1
@@ -752,6 +754,10 @@ class SignalAdapterRuntime:
         if processed.presence_score < 0.15:
             device["csi_breathing_bpm"] = 0.0
             device["csi_heart_rate"] = 0.0
+            # GitHub #11: presence<0.15 → 모든 vitals 필드 0으로 초기화
+            device["breathing_bpm"] = 0.0
+            device["heart_rate"] = 0.0
+            device["n_persons"] = 0
         else:
             # csi_breathing_bpm: clamp to 6–30 BPM (GitHub #9)
             if processed.breathing_rate is not None:
@@ -761,11 +767,8 @@ class SignalAdapterRuntime:
                 device["csi_breathing_bpm"] = _br
             if processed.heart_rate is not None:
                 device["csi_heart_rate"] = processed.heart_rate
-            # Use server vitals as fallback when firmware vitals unavailable
-            if device.get("breathing_bpm", 0) == 0 and processed.breathing_rate:
-                device["breathing_bpm"] = processed.breathing_rate
-            if device.get("heart_rate", 0) == 0 and processed.heart_rate:
-                device["heart_rate"] = processed.heart_rate
+            # GitHub #11: breathing_bpm/heart_rate는 vitals UDP 핸들러에서만 관리
+            # CSI fallback 제거 — csi_breathing_bpm/csi_heart_rate 필드를 사용할 것
 
         # Recompute presence for all zones
         self._recompute_presence_count()
@@ -799,17 +802,14 @@ class SignalAdapterRuntime:
         device["lastSeen"] = iso_now()
 
         # Track per-node vitals
-        device["n_persons"] = n_persons
+        # GitHub #11: 펌웨어 presence_score는 Welford 캘리브레이션을 모르므로
+        # n_persons만 Welford z-score로 가드. breathing/hr는 CSI 핸들러가 단독 관리.
         device["presence_score"] = presence_score
         device["motion_energy"] = motion_energy
-        # GitHub #9: 서버측 필터링 — 정상 범위(6~30 BPM) 외 firmware 값은 0으로 마스킹
-        # GitHub #7: presence < 0.15 = 노이즈 구간 → firmware vitals 억제
-        if presence_score >= 0.15:
-            device["breathing_bpm"] = breathing_bpm if 6.0 <= breathing_bpm <= 30.0 else 0.0
-            device["heart_rate"] = heart_rate
-        else:
-            device["breathing_bpm"] = 0.0
-            device["heart_rate"] = 0.0
+        welford_confirmed = device.get("_presence_z", 0) > 0
+        device["n_persons"] = n_persons if welford_confirmed else 0
+        # breathing_bpm / heart_rate는 CSI 핸들러(process_csi_frame)에서만 설정
+        # 여기서 건드리지 않음 — 두 핸들러가 같은 필드를 경쟁하지 않도록 함
 
         # Assign device to closest zone
         device_zone_id = assign_device_zone(device, self.zones)
