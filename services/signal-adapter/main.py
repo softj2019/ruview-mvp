@@ -2,6 +2,7 @@ import asyncio
 import json
 import math
 import os
+import pathlib
 import struct
 import time as _time
 from contextlib import asynccontextmanager
@@ -211,6 +212,11 @@ class SignalAdapterRuntime:
         self._empty_room_calibrated = False
         self._empty_room_calibrated_at: str | None = None
         self._empty_room_baselines: dict = {}  # device_id -> presence_score baseline
+        # 시간적 일관성 필터: 연속 N프레임 z>0 유지 시에만 presenceCount 증가
+        # 단발성 RF 스파이크 제거 (weekend_learner p99 분석 결과)
+        self._presence_streak: dict = {}   # device_id -> 연속 z>0 프레임 수
+        PRESENCE_STREAK_REQUIRED = 3       # 연속 3프레임 (≈1.5초) 유지 필요
+        self._PRESENCE_STREAK_REQUIRED = PRESENCE_STREAK_REQUIRED
         # Kalman filter for presenceCount smoothing (Phase 5-3)
         self._kalman = KalmanSmooth(process_noise=0.5, measurement_noise=2.0)
         # Camera detection timestamp for time-based fusion staleness check
@@ -328,10 +334,17 @@ class SignalAdapterRuntime:
                 continue
 
             # Detection: score above calibrated threshold
+            # weekend_learner p99 분석: 단발 스파이크 제거 — 연속 N프레임 유지 필요
             if score > tracker["threshold"]:
-                nodes_with_presence += 1
-                dev["_presence_z"] = tracker["stats"].z_score(score)
+                streak = self._presence_streak.get(did, 0) + 1
+                self._presence_streak[did] = streak
+                if streak >= self._PRESENCE_STREAK_REQUIRED:
+                    nodes_with_presence += 1
+                    dev["_presence_z"] = tracker["stats"].z_score(score)
+                else:
+                    dev["_presence_z"] = 0.0  # 아직 streak 미달
             else:
+                self._presence_streak[did] = 0
                 dev["_presence_z"] = 0.0
 
             # Slow threshold drift (don't corrupt Welford stats)
@@ -550,6 +563,69 @@ class SignalAdapterRuntime:
         self._empty_room_calibrated = True
         self._empty_room_calibrated_at = now
         return {"calibrated_at": now, "nodes": len(baselines)}
+
+    def patch_thresholds(self, thresholds: dict) -> dict:
+        """직접 threshold 패치 — Welford reset 없이 임계값만 교체.
+
+        thresholds: { "node-1": 11.6118, "node-2": 8.3066, ... }
+        Returns applied / skipped counts.
+        """
+        applied = []
+        skipped = []
+        for did, thr in thresholds.items():
+            thr = float(thr)
+            if did not in self._presence_welford:
+                # tracker가 없으면 빈 calibrated 상태로 생성
+                self._presence_welford[did] = {
+                    "stats": WelfordStats(),
+                    "calibrated": True,
+                    "threshold": thr,
+                }
+                applied.append(did)
+            else:
+                self._presence_welford[did]["threshold"] = thr
+                self._presence_welford[did]["calibrated"] = True
+                # device cache도 동기화
+                if did in self.devices:
+                    self.devices[did]["_presence_threshold"] = thr
+                applied.append(did)
+        # 재시작 후에도 유지되도록 파일에 저장
+        self._save_thresholds(thresholds)
+        return {"applied": applied, "skipped": skipped}
+
+    _THRESHOLDS_PATH = pathlib.Path(__file__).parent / "thresholds.json"
+
+    def _save_thresholds(self, new_thresholds: dict):
+        """현재 전체 threshold를 thresholds.json에 기록."""
+        existing = {}
+        if self._THRESHOLDS_PATH.exists():
+            try:
+                existing = json.loads(self._THRESHOLDS_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        # _로 시작하는 메타 키는 유지
+        meta = {k: v for k, v in existing.items() if k.startswith("_")}
+        merged = {k: v for k, v in existing.items() if not k.startswith("_")}
+        merged.update(new_thresholds)
+        merged["_updated"] = datetime.now(
+            timezone(timedelta(hours=9))
+        ).strftime("%Y-%m-%dT%H:%M:%S+09:00")
+        merged["_source"] = "patch_thresholds API"
+        merged.update({k: v for k, v in meta.items() if k not in merged})
+        self._THRESHOLDS_PATH.write_text(
+            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def load_saved_thresholds(self) -> dict:
+        """thresholds.json에서 저장된 임계값 로드."""
+        if not self._THRESHOLDS_PATH.exists():
+            return {}
+        try:
+            data = json.loads(self._THRESHOLDS_PATH.read_text(encoding="utf-8"))
+            return {k: float(v) for k, v in data.items() if not k.startswith("_")}
+        except Exception as e:
+            print(f"[signal-adapter] thresholds.json 로드 실패: {e}")
+            return {}
 
     def build_learning_report(self) -> dict:
         """Build Learning Report snapshot."""
@@ -978,6 +1054,12 @@ async def lifespan(app: FastAPI):
     offline_task = asyncio.create_task(_offline_check_loop())
     hourly_report_task = asyncio.create_task(_hourly_report_loop())
 
+    # 저장된 threshold 복원 (재시작 시 학습 결과 유지)
+    saved_thr = runtime.load_saved_thresholds()
+    if saved_thr:
+        result = runtime.patch_thresholds(saved_thr)
+        print(f"[signal-adapter] 저장된 threshold 복원: {result['applied']}")
+
     # Cloudflare bridge (outbound relay for external access)
     bridge_url = os.getenv("RUVIEW_BRIDGE_URL")
     bridge_session = os.getenv("RUVIEW_BRIDGE_SESSION", "default")
@@ -1016,6 +1098,23 @@ async def lifespan(app: FastAPI):
         print(f"[signal-adapter] mmWave bridge started on UDP port {mmwave_port}")
     else:
         print("[signal-adapter] mmWave bridge disabled (RUVIEW_MMWAVE_PORT not set)")
+
+    # threshold_overrides.json 로드 — weekend_learner 권장값 자동 반영
+    _override_path = pathlib.Path(__file__).parent / "fall_data" / "threshold_overrides.json"
+    if _override_path.exists():
+        try:
+            with open(_override_path, encoding="utf-8") as _f:
+                _overrides = json.load(_f)
+            _thresholds = _overrides.get("thresholds", {})
+            if _thresholds:
+                result = runtime.patch_thresholds(_thresholds)
+                print(
+                    f"[signal-adapter] threshold_overrides 로드 완료 "
+                    f"(generated: {_overrides.get('generated_at', '?')}) "
+                    f"applied={result['applied']}"
+                )
+        except Exception as _e:
+            print(f"[signal-adapter] threshold_overrides 로드 실패: {_e}")
 
     print(f"[signal-adapter] Starting up on UDP {UDP_HOST}:{UDP_PORT}...")
     yield
@@ -1390,6 +1489,21 @@ async def websocket_events(websocket: WebSocket):
 async def calibrate_empty_room():
     """Snapshot current state as empty-room baseline and reset Welford trackers."""
     result = runtime.calibrate_empty_room()
+    await runtime.broadcast("learning_report", runtime.build_learning_report())
+    return {"status": "ok", **result}
+
+
+@app.post("/api/calibration/thresholds", dependencies=[Depends(verify_api_key)])
+async def patch_thresholds(body: dict):
+    """Welford reset 없이 노드별 threshold만 직접 교체.
+
+    Body: { "thresholds": { "node-1": 11.6118, "node-2": 8.3066, ... } }
+    """
+    thresholds = body.get("thresholds")
+    if not thresholds or not isinstance(thresholds, dict):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=422, detail="thresholds dict required")
+    result = runtime.patch_thresholds(thresholds)
     await runtime.broadcast("learning_report", runtime.build_learning_report())
     return {"status": "ok", **result}
 

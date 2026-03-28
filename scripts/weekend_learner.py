@@ -148,10 +148,12 @@ def analyze_false_positives(rows):
 
 
 def apply_suggested_thresholds(stats):
-    """빈방 학습 기반 threshold를 signal-adapter에 POST로 반영 (캘리브레이션 대체)"""
-    # 직접 threshold patch — POST /api/calibration/empty-room 이 Welford reset
-    # 대신 임계값만 직접 조정하는 endpoint 없으므로 빈방 캘리브레이션으로 대체
-    result = post_json(f"{SIGNAL_URL}/api/calibration/empty-room", {})
+    """빈방 학습 기반 권장 threshold를 signal-adapter에 직접 반영.
+
+    /api/calibration/thresholds 로 노드별 임계값만 패치 (Welford reset 없음).
+    """
+    thresholds = {did: s["suggested_threshold"] for did, s in stats.items()}
+    result = post_json(f"{SIGNAL_URL}/api/calibration/thresholds", {"thresholds": thresholds})
     return result
 
 
