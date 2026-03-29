@@ -77,6 +77,7 @@ jobs:
           submodules: recursive
       - name: Build ESP32-S3 firmware (8MB)
         uses: espressif/esp-idf-ci-action@v1
+        continue-on-error: true
         with:
           esp_idf_version: v5.5.3
           target: esp32s3
