@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play, Globe, BarChart2, Building2, Users, FileText, Menu, X } from 'lucide-react';
+import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play, Globe, BarChart2, Building2, Users, FileText, Menu, X, Layers } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { NightModeToggle } from '@/components/ui/NightModeToggle';
@@ -17,6 +17,7 @@ const navItems: { to: string; label: string; icon: typeof LayoutDashboard; exter
   { to: '/building', label: '건물 관제', icon: Building2 },
   { to: '/viz', label: '시각화', icon: BarChart2 },
   { to: '/residents', label: '입주자', icon: Users },
+  { to: '/rf-tomography', label: 'RF 히트맵', icon: Layers },
   { to: '/reports', label: '리포트', icon: FileText },
   { to: '/settings', label: '설정', icon: Settings },
 ];

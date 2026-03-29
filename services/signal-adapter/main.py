@@ -1587,3 +1587,50 @@ async def ingest_csi(payload: dict):
     processed = runtime.csi_processor.process(payload)
     await runtime.handle_processed(processed)
     return {"processed": 1}
+
+
+@app.get("/api/rf-tomography")
+async def rf_tomography(rows: int = 20, cols: int = 20, lambda_reg: float = 0.1):
+    """RF 토모그래피 — ISTA 알고리즘으로 공간 점유도 격자 재구성.
+
+    온라인 디바이스의 CSI 진폭 및 위치를 사용해 2D 점유도 히트맵을 반환한다.
+    """
+    from rf_tomography import RFTomography
+
+    # 온라인 디바이스만 추출
+    online = [
+        d for d in runtime.devices.values()
+        if d.get("status") == "online" and d.get("x") is not None and d.get("y") is not None
+    ]
+    if len(online) < 2:
+        return {
+            "grid": [[0.0] * cols for _ in range(rows)],
+            "rows": rows,
+            "cols": cols,
+            "max_value": 0.0,
+            "mean_value": 0.0,
+            "occupied_cells": 0,
+            "node_count": len(online),
+            "error": "온라인 노드 2개 이상 필요",
+        }
+
+    # 위치를 [0, 1] 정규화 (플로어맵 800×400 기준)
+    FLOOR_W, FLOOR_H = 800.0, 400.0
+    node_positions = [
+        (min(max(d["x"] / FLOOR_W, 0.0), 1.0), min(max(d["y"] / FLOOR_H, 0.0), 1.0))
+        for d in online
+    ]
+
+    # CSI 진폭 벡터 구성 (디바이스별 스칼라 — 서브캐리어 평균)
+    csi_vector = [float(d.get("csi_amplitude") or d.get("motion_energy") or 0.0) for d in online]
+    csi_arr = np.array(csi_vector, dtype=np.float64)
+
+    tomo = RFTomography(grid_size=(rows, cols), lambda_reg=lambda_reg, max_iter=150)
+    grid = tomo.reconstruct(csi_arr, node_positions)
+    result = tomo.visualize()
+    result["node_count"] = len(online)
+    result["nodes"] = [
+        {"id": d["id"], "x": d["x"], "y": d["y"], "nx": node_positions[i][0], "ny": node_positions[i][1]}
+        for i, d in enumerate(online)
+    ]
+    return result

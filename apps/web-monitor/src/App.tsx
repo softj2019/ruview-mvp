@@ -13,6 +13,7 @@ import VizPage from './pages/VizPage';
 import BuildingPage from './pages/BuildingPage';
 import ResidentsPage from './pages/ResidentsPage';
 import ReportsPage from './pages/ReportsPage';
+import RFTomographyPage from './pages/RFTomographyPage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore } from '@/stores/deviceStore';
@@ -122,6 +123,7 @@ export default function App() {
           <Route path="/building" element={<BuildingPage />} />
           <Route path="/residents" element={<ResidentsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
+          <Route path="/rf-tomography" element={<RFTomographyPage />} />
         </Route>
       </Routes>
     </DataProvider>
