@@ -185,3 +185,63 @@ def build_densepose_head(input_channels: int = 64,
 
 
 TORCH_AVAILABLE = _TORCH_AVAILABLE
+
+
+# ---------------------------------------------------------------------------
+# WiFi-pose rule-based keypoint head (Phase C-3)
+# ---------------------------------------------------------------------------
+class WifiPoseHead:
+    """
+    WiFi CSI → DensePose 헤드 (스캐폴드 + 규칙기반 fallback).
+
+    Stage 2 구현 예정: CSI 특성벡터 → 24부위 UV 좌표 회귀
+    현재: WiFiPoseEstimator의 규칙기반 결과를 UV 좌표로 변환
+    """
+
+    BODY_PARTS = [
+        "nose", "neck", "right_shoulder", "right_elbow", "right_wrist",
+        "left_shoulder", "left_elbow", "left_wrist", "right_hip", "right_knee",
+        "right_ankle", "left_hip", "left_knee", "left_ankle",
+        "right_eye", "left_eye", "right_ear", "left_ear",
+    ]
+
+    def pose_to_keypoints(self, pose_class: str, joints: dict) -> list[dict]:
+        """포즈 클래스 + 관절 각도 → 17개 COCO 키포인트 (정규화 좌표)."""
+        # 기준 스켈레톤 (정면 서있는 자세 [x, y] in [0,1])
+        base: dict[str, list[float]] = {
+            "nose": [0.5, 0.05], "neck": [0.5, 0.15],
+            "right_shoulder": [0.65, 0.22], "right_elbow": [0.72, 0.38],
+            "right_wrist": [0.75, 0.52],
+            "left_shoulder": [0.35, 0.22], "left_elbow": [0.28, 0.38],
+            "left_wrist": [0.25, 0.52],
+            "right_hip": [0.58, 0.50], "right_knee": [0.60, 0.70],
+            "right_ankle": [0.61, 0.90],
+            "left_hip": [0.42, 0.50], "left_knee": [0.40, 0.70],
+            "left_ankle": [0.39, 0.90],
+            "right_eye": [0.53, 0.03], "left_eye": [0.47, 0.03],
+            "right_ear": [0.56, 0.05], "left_ear": [0.44, 0.05],
+        }
+        # 포즈별 변형
+        kpts = {k: list(v) for k, v in base.items()}
+        if pose_class == "sitting":
+            for k in ["right_knee", "right_ankle", "left_knee", "left_ankle"]:
+                kpts[k][1] = max(0.0, kpts[k][1] - 0.2)
+            for k in ["right_hip", "left_hip"]:
+                kpts[k][1] = 0.45
+        elif pose_class == "lying":
+            for k in kpts:
+                kpts[k] = [kpts[k][1], 0.5]  # 90도 회전
+        elif pose_class == "fallen":
+            for k in kpts:
+                kpts[k][1] = 0.9
+
+        # 팔 올림 적용
+        arm_raise = joints.get("left_arm_raise", 0)
+        if arm_raise > 0.3:
+            kpts["left_elbow"][1] -= arm_raise * 0.15
+            kpts["left_wrist"][1] -= arm_raise * 0.25
+
+        return [
+            {"part": p, "x": round(kpts[p][0], 3), "y": round(kpts[p][1], 3), "confidence": 0.7}
+            for p in self.BODY_PARTS if p in kpts
+        ]

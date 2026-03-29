@@ -14,8 +14,10 @@ import BuildingPage from './pages/BuildingPage';
 import ResidentsPage from './pages/ResidentsPage';
 import ReportsPage from './pages/ReportsPage';
 import RFTomographyPage from './pages/RFTomographyPage';
+import PositionPage from './pages/PositionPage';
 import SleepPage from './pages/SleepPage';
 import AnalyticsPage from './pages/AnalyticsPage';
+import WifiPosePage from './pages/WifiPosePage';
 import AppShell from './components/layout/AppShell';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { useDeviceStore } from '@/stores/deviceStore';
@@ -126,8 +128,10 @@ export default function App() {
           <Route path="/residents" element={<ResidentsPage />} />
           <Route path="/reports" element={<ReportsPage />} />
           <Route path="/rf-tomography" element={<RFTomographyPage />} />
+          <Route path="/position" element={<PositionPage />} />
           <Route path="/sleep" element={<SleepPage />} />
           <Route path="/analytics" element={<AnalyticsPage />} />
+          <Route path="/wifi-pose" element={<WifiPosePage />} />
         </Route>
       </Routes>
     </DataProvider>

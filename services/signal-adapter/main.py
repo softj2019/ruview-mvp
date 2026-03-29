@@ -718,8 +718,18 @@ class SignalAdapterRuntime:
         # Include breathing and heart rate in signal payload for chart
         dev = self.devices.get(processed.device_id, {})
 
+        # Coherence Gate: 비일관 서브캐리어 마스킹 (lazy init)
+        if not hasattr(runtime, '_coherence_gate'):
+            from coherence_gate import CoherenceGate
+            runtime._coherence_gate = CoherenceGate()
+        _raw_amp = processed.amplitude or []
+        if _raw_amp:
+            _gated_amp, _cg_stats = runtime._coherence_gate.apply(_raw_amp)
+        else:
+            _gated_amp = _raw_amp
+
         # Sample up to 30 subcarrier amplitudes for Observatory CSI heatmap
-        _amp = processed.amplitude or []
+        _amp = _gated_amp
         _step = max(1, len(_amp) // 30)
         _sampled = [round(float(_amp[i]), 3) for i in range(0, min(len(_amp), _step * 30), _step)]
 
@@ -1777,3 +1787,116 @@ async def rf_tomography(rows: int = 20, cols: int = 20, lambda_reg: float = 0.1)
         for i, d in enumerate(online)
     ]
     return result
+
+
+@app.get("/api/aoa/position")
+async def aoa_position():
+    """SpotFi 기반 위치 추정 — 다중 노드 위상 차이 삼각측량."""
+    try:
+        from aoa_estimator import AoAEstimator
+    except ImportError:
+        from .aoa_estimator import AoAEstimator
+    if not hasattr(runtime, '_aoa_estimator'):
+        runtime._aoa_estimator = AoAEstimator()
+    online = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    for d in online:
+        phases = d.get("csi_phases", []) or []
+        amplitudes_raw = d.get("csi_amplitudes", []) or []
+        if not phases and not amplitudes_raw:
+            # 위상 없으면 진폭으로 합성
+            amp = float(d.get("csi_amplitude") or 0)
+            phases = [amp * 0.1]  # 더미 위상
+            amplitudes_raw = [amp]
+        runtime._aoa_estimator.update_node(
+            node_id=d["id"],
+            x=float(d.get("x") or 0),
+            y=float(d.get("y") or 0),
+            phases=phases,
+            amplitudes=amplitudes_raw,
+        )
+    return runtime._aoa_estimator.get_all_estimates()
+
+
+@app.get("/api/multistatic/fusion")
+async def multistatic_fusion():
+    """멀티스태틱 퓨전 결과 — 모든 활성 TX-RX 링크의 가중 합산."""
+    from multistatic_fusion import MultistaticFuser
+
+    # runtime에 fuser 없으면 초기화
+    if not hasattr(runtime, '_multistatic_fuser'):
+        runtime._multistatic_fuser = MultistaticFuser()
+
+    # 현재 온라인 디바이스로 링크 업데이트
+    FLOOR_W, FLOOR_H = 800.0, 400.0
+    online = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    for tx in online:
+        for rx in online:
+            if tx["id"] == rx["id"]:
+                continue
+            tx_pos = (tx.get("x", 0) / FLOOR_W, tx.get("y", 0) / FLOOR_H)
+            rx_pos = (rx.get("x", 0) / FLOOR_W, rx.get("y", 0) / FLOOR_H)
+            runtime._multistatic_fuser.update_link(
+                tx_id=tx["id"], rx_id=rx["id"],
+                tx_pos=tx_pos, rx_pos=rx_pos,
+                motion_index=float(tx.get("motion_energy", 0) or 0),
+                csi_amplitude=float(tx.get("csi_amplitude", 0) or 0),
+            )
+    return runtime._multistatic_fuser.fuse()
+
+
+@app.get("/api/multistatic/matrix")
+async def multistatic_matrix():
+    """N×N 링크 매트릭스 — 시각화용."""
+    if not hasattr(runtime, '_multistatic_fuser'):
+        return {"nodes": [], "matrix": {}}
+    return runtime._multistatic_fuser.get_link_matrix()
+
+
+@app.get("/api/coherence/status")
+async def coherence_status():
+    """Coherence Gate 현재 필터링 통계."""
+    if not hasattr(runtime, '_coherence_gate'):
+        return {"status": "not_initialized", "message": "CSI 프레임 수신 대기 중"}
+    gate = runtime._coherence_gate
+    return {
+        "window_size": gate.window_size,
+        "msc_threshold": gate.msc_threshold,
+        "history_frames": len(gate._history),
+        "status": "active" if len(gate._history) >= 4 else "warming_up",
+    }
+
+
+@app.get("/api/pose/wifi")
+async def wifi_pose():
+    """WiFi CSI 기반 6종 자세 분류 + 관절 각도 추정."""
+    from wifi_pose_estimator import WiFiPoseEstimator
+    if not hasattr(runtime, '_wifi_pose'):
+        runtime._wifi_pose = WiFiPoseEstimator()
+    online = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    for d in online:
+        runtime._wifi_pose.update(
+            device_id=d["id"],
+            motion_index=float(d.get("motion_energy") or 0),
+            breathing_rate=float(d.get("breathing_bpm") or 0),
+            velocity=float(d.get("max_velocity") or 0),
+            heart_rate=float(d.get("heart_rate") or 0),
+            amplitude=d.get("csi_amplitudes") or [],
+            timestamp=d.get("lastSeen") or "",
+        )
+    return {"poses": runtime._wifi_pose.get_all(), "device_count": len(online)}
+
+
+@app.get("/api/pose/keypoints/{device_id}")
+async def wifi_pose_keypoints(device_id: str):
+    """디바이스별 17-keypoint COCO 스켈레톤."""
+    from wifi_pose_estimator import WiFiPoseEstimator
+    from models.densepose_head import WifiPoseHead
+    if not hasattr(runtime, '_wifi_pose'):
+        return {"keypoints": [], "pose": "unknown"}
+    poses = runtime._wifi_pose.get_all()
+    if device_id not in poses:
+        return {"keypoints": [], "pose": "unknown"}
+    p = poses[device_id]
+    head = WifiPoseHead()
+    kpts = head.pose_to_keypoints(p["pose"], p["joints"])
+    return {"keypoints": kpts, "pose": p["pose"], "confidence": p["confidence"]}

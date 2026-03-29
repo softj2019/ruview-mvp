@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play, Globe, BarChart2, Building2, Users, FileText, Menu, X, Layers, Moon, TrendingUp } from 'lucide-react';
+import { Activity, LayoutDashboard, Cpu, Bell, Radio, Settings, GitMerge, HardDrive, Play, Globe, BarChart2, Building2, Users, FileText, Menu, X, Layers, Moon, TrendingUp, Crosshair, PersonStanding } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { NightModeToggle } from '@/components/ui/NightModeToggle';
@@ -22,6 +22,8 @@ const navItems: NavItem[] = [
   { to: '/pose-fusion', label: '포즈 융합', icon: GitMerge },
   { to: '/sleep', label: '수면 모니터', icon: Moon },
   { to: '/analytics', label: '공간 분석', icon: TrendingUp },
+  { to: '/position', label: '위치 추정', icon: Crosshair },
+  { to: '/wifi-pose', label: 'WiFi 포즈', icon: PersonStanding },
   // ── 시각화
   { type: 'divider', label: '시각화' },
   { to: '/observatory', label: '3D 관측소', icon: Globe },
