@@ -43,11 +43,15 @@ jobs:
         run: |
           cd services/signal-adapter
           pip install -r requirements.txt
-          pip install pytest pytest-asyncio
-      - name: Run unit tests
+          pip install pytest pytest-asyncio pytest-cov
+      - name: Run unit tests with coverage
         run: |
           cd services/signal-adapter
-          python -m pytest tests/ -v --tb=short
+          python -m pytest tests/ -v --tb=short --cov=. --cov-report=xml --cov-fail-under=20
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: services/signal-adapter/coverage.xml
       - name: Verify imports
         run: |
           cd services/signal-adapter

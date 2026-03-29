@@ -30,7 +30,7 @@ scrape_configs:
   # signal-adapter — CSI 처리 서비스 (port 8001)
   - job_name: 'signal-adapter'
     static_configs:
-      - targets: ['signal-adapter:8001']
+      - targets: ['host.docker.internal:8001']
         labels:
           service: 'signal-adapter'
           component: 'csi-processor'
@@ -40,7 +40,7 @@ scrape_configs:
   # api-gateway — REST+WS 프록시 (port 8000)
   - job_name: 'api-gateway'
     static_configs:
-      - targets: ['api-gateway:8000']
+      - targets: ['host.docker.internal:8000']
         labels:
           service: 'api-gateway'
           component: 'proxy'

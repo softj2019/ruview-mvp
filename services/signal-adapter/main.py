@@ -674,6 +674,15 @@ class SignalAdapterRuntime:
             self._motion_history[did] = deque(maxlen=self._motion_history_max)
         self._motion_history[did].append(processed.motion_index)
 
+        # MERIDIAN: CSI 처리 후 모달리티 품질 점수 업데이트 (lazy init)
+        if not hasattr(runtime, '_meridian'):
+            from meridian import MeridianController
+            runtime._meridian = MeridianController()
+        runtime._meridian.update_csi(
+            motion_index=processed.motion_index,
+            coherence_ratio=processed.presence_score,
+        )
+
         # Ensure notifier backends are ready
         self._ensure_notifier_backends()
 
@@ -1900,3 +1909,23 @@ async def wifi_pose_keypoints(device_id: str):
     head = WifiPoseHead()
     kpts = head.pose_to_keypoints(p["pose"], p["joints"])
     return {"keypoints": kpts, "pose": p["pose"], "confidence": p["confidence"]}
+
+
+def _get_meridian() -> "MeridianController":
+    """MERIDIAN 컨트롤러 lazy init."""
+    if not hasattr(runtime, '_meridian'):
+        from meridian import MeridianController
+        runtime._meridian = MeridianController()
+    return runtime._meridian
+
+
+@app.get("/api/meridian/status")
+async def meridian_status():
+    """MERIDIAN — 전체 모달리티 상태 및 활성 모달리티 반환."""
+    return _get_meridian().get_status()
+
+
+@app.get("/api/meridian/weights")
+async def meridian_weights():
+    """MERIDIAN — 모달리티별 퓨전 가중치 (합산 1.0) 반환."""
+    return {"weights": _get_meridian().get_fusion_weights()}
