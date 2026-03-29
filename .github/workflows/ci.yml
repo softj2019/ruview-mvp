@@ -47,7 +47,7 @@ jobs:
       - name: Run unit tests with coverage
         run: |
           cd services/signal-adapter
-          python -m pytest tests/ -v --tb=short --cov=. --cov-report=xml --cov-fail-under=20
+          python -m pytest tests/ -v --tb=short --cov=. --cov-report=xml --cov-fail-under=40
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-report
@@ -81,7 +81,6 @@ jobs:
           submodules: recursive
       - name: Build ESP32-S3 firmware (8MB)
         uses: espressif/esp-idf-ci-action@v1
-        continue-on-error: true
         with:
           esp_idf_version: v5.5.3
           target: esp32s3

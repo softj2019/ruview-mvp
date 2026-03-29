@@ -48,7 +48,31 @@ export interface CameraDetectionPayload {
     pose_confidence: number;
     bbox?: [number, number, number, number];
   }>;
+  detections?: Array<{
+    pose?: string;
+    pose_confidence?: number;
+    device_id?: string;
+    [key: string]: unknown;
+  }>;
+  person_count?: number;
   timestamp?: string;
+}
+
+// ── Pose update ───────────────────────────────────────────────────────────────
+
+/**
+ * Emitted by signal-adapter after camera+CSI pose fusion.
+ * Payload contains fused pose results per detected person.
+ */
+export interface PoseUpdatePayload {
+  poses: Array<{
+    pose: string;
+    pose_confidence: number;
+    device_id: string | null;
+    camera_pose?: string;
+    csi_pose?: string;
+    [key: string]: unknown;
+  }>;
 }
 
 // ── Discriminated union ──────────────────────────────────────────────────────
@@ -65,4 +89,5 @@ export type WSMessage =
   | { type: 'vitals'; payload: VitalsPayload }
   | { type: 'event'; payload: DetectionEvent }
   | { type: 'camera_detection'; payload: CameraDetectionPayload }
+  | { type: 'pose_update'; payload: PoseUpdatePayload }
   | { type: 'alert'; payload: AlertItem };

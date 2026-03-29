@@ -24,6 +24,8 @@ export interface Device {
   csi_breathing_bpm?: number;
   csi_heart_rate?: number;
   zone_id?: string;
+  pose?: string;
+  pose_confidence?: number;
 }
 
 interface DeviceState {

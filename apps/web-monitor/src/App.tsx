@@ -78,8 +78,35 @@ function DataProvider({ children }: { children: React.ReactNode }) {
           setZones(msg.payload.zones);
           break;
         case 'vitals':
+          useDeviceStore.getState().updateDevice(msg.payload.device_id, {
+            breathing_bpm: msg.payload.breathing_rate_bpm,
+            heart_rate: msg.payload.heart_rate_bpm,
+            motion_energy: msg.payload.motion_energy,
+            presence_score: msg.payload.presence_score,
+            n_persons: msg.payload.n_persons,
+          });
           break;
         case 'camera_detection':
+          if (msg.payload.detections) {
+            for (const det of msg.payload.detections) {
+              if (det.device_id && det.pose !== undefined) {
+                useDeviceStore.getState().updateDevice(det.device_id, {
+                  pose: det.pose,
+                  pose_confidence: det.pose_confidence,
+                });
+              }
+            }
+          }
+          break;
+        case 'pose_update':
+          for (const p of msg.payload.poses) {
+            if (p.device_id) {
+              useDeviceStore.getState().updateDevice(p.device_id, {
+                pose: p.pose,
+                pose_confidence: p.pose_confidence,
+              });
+            }
+          }
           break;
         case 'alert':
           addAlert(msg.payload);

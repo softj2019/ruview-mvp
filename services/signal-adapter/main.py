@@ -34,6 +34,11 @@ try:
     from .fall_detector import FallDetector, extract_features as extract_fall_features
     from .notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
     from .mmwave_bridge import MmWaveBridge
+    from .sleep_monitor import SleepMonitor
+    from .gait_analyzer import GaitAnalyzer
+    from .emotion_estimator import EmotionEstimator
+    from .panic_detector import PanicDetector
+    from .retail_analytics import RetailAnalytics
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
@@ -42,6 +47,11 @@ except ImportError:
     from fall_detector import FallDetector, extract_features as extract_fall_features
     from notifier import Notifier, ConsoleBackend, WebSocketBackend, WebhookBackend
     from mmwave_bridge import MmWaveBridge
+    from sleep_monitor import SleepMonitor
+    from gait_analyzer import GaitAnalyzer
+    from emotion_estimator import EmotionEstimator
+    from panic_detector import PanicDetector
+    from retail_analytics import RetailAnalytics
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -243,6 +253,12 @@ class SignalAdapterRuntime:
         self._camera_fall_candidates: dict[str, bool] = {}  # detection_id -> True
         # mmWave integration framework (Phase 5-5)
         self.mmwave_bridge: MmWaveBridge | None = None
+        # Analysis modules (sleep, gait, emotion, panic, retail)
+        self.sleep_monitor = SleepMonitor()
+        self.gait_analyzer = GaitAnalyzer()
+        self.emotion_estimator = EmotionEstimator()
+        self.panic_detector = PanicDetector()
+        self.retail_analytics = RetailAnalytics()
 
     def _ensure_notifier_backends(self) -> None:
         """Lazily add WebSocket and Webhook backends once broadcast is available."""
@@ -760,6 +776,101 @@ class SignalAdapterRuntime:
 
         # Include breathing and heart rate in signal payload for chart
         dev = self.devices.get(processed.device_id, {})
+        node_id = processed.device_id
+
+        # ── ProcessedCSI 필드 → device dict 저장 (sleep/gait/emotion 사전 저장)
+        dev["sleep_stage"] = processed.sleep_stage
+        dev["apnea_event"] = processed.apnea_event
+        dev["apnea_duration"] = processed.apnea_duration
+        dev["gait_cadence"] = processed.gait_cadence
+        dev["gait_asymmetry"] = processed.gait_asymmetry
+        dev["gait_variability"] = processed.gait_variability
+        dev["fall_risk_score"] = processed.fall_risk_score
+        dev["emotion_state"] = processed.emotion_state
+        dev["emotion_confidence"] = processed.emotion_confidence
+
+        # ── 수면 분석
+        try:
+            _br = processed.breathing_rate or 0.0
+            _amp_mean = float(avg(processed.amplitude)) if processed.amplitude else 0.0
+            sleep_result = self.sleep_monitor.update(
+                device_id=node_id,
+                breathing_rate=_br,
+                breathing_amplitude=_amp_mean,
+                motion_index=processed.motion_index,
+                timestamp=processed.timestamp,
+            )
+            dev["sleep_stage"] = sleep_result.get("stage", dev["sleep_stage"])
+            dev["sleep_brv"] = sleep_result.get("brv", 0.0)
+            dev["apnea_active"] = sleep_result.get("apnea_active", False)
+            if sleep_result.get("apnea_event"):
+                dev["apnea_event"] = True
+                dev["apnea_duration"] = sleep_result["apnea_event"].get("duration_seconds", 0.0)
+        except Exception:
+            pass
+
+        # ── 보행 분석
+        try:
+            _velocity = processed.doppler_velocity if processed.doppler_velocity is not None else 0.0
+            gait_result = self.gait_analyzer.update(
+                device_id=node_id,
+                motion_index=processed.motion_index,
+                velocity=_velocity,
+                timestamp=processed.timestamp,
+            )
+            dev["gait_cadence"] = gait_result.get("cadence", dev["gait_cadence"])
+            dev["gait_asymmetry"] = gait_result.get("asymmetry", dev["gait_asymmetry"])
+            dev["gait_variability"] = gait_result.get("variability", dev["gait_variability"])
+            dev["fall_risk_score"] = gait_result.get("fall_risk_score", dev["fall_risk_score"])
+        except Exception:
+            pass
+
+        # ── 감정 추정
+        try:
+            _hr = processed.heart_rate or 0.0
+            _sdnn = processed.sdnn if processed.sdnn else 0.0
+            _br_e = processed.breathing_rate or 0.0
+            emotion_result = self.emotion_estimator.update(
+                device_id=node_id,
+                heart_rate=_hr,
+                sdnn=_sdnn,
+                motion_index=processed.motion_index,
+                breathing_rate=_br_e,
+            )
+            dev["emotion_state"] = emotion_result.get("emotion", dev["emotion_state"])
+            dev["emotion_confidence"] = emotion_result.get("confidence", dev["emotion_confidence"])
+        except Exception:
+            pass
+
+        # ── 패닉 감지
+        try:
+            panic_event = self.panic_detector.evaluate(
+                device_id=node_id,
+                motion_index=processed.motion_index,
+                timestamp=processed.timestamp,
+            )
+            if panic_event is not None:
+                dev["panic_detected"] = True
+                dev["panic_score"] = panic_event.get("motion_index", processed.motion_index)
+                dev["panic_reason"] = panic_event.get("reason", "")
+            else:
+                dev["panic_detected"] = False
+                dev["panic_score"] = 0.0
+        except Exception:
+            pass
+
+        # ── 소매/존 체류 분석 (RetailAnalytics)
+        try:
+            _zone_id = dev.get("zone_id", "unknown")
+            if _zone_id and _zone_id != "unknown":
+                _presence_count = 1 if dev.get("_presence_z", 0) > 0 else 0
+                self.retail_analytics.update_presence(
+                    zone_id=_zone_id,
+                    count=_presence_count,
+                    timestamp=processed.timestamp,
+                )
+        except Exception:
+            pass
 
         # Coherence Gate: 비일관 서브캐리어 마스킹 (lazy init)
         if not hasattr(runtime, '_coherence_gate'):
@@ -881,6 +992,13 @@ class SignalAdapterRuntime:
         # HRV analysis (Phase Additional C)
         if processed.hrv is not None:
             device["hrv"] = processed.hrv
+
+        # ProcessedCSI → device dict 저장 (fall risk, HRV metrics, arrhythmia)
+        device["fall_risk_score"] = getattr(processed, "fall_risk_score", 0.0)
+        device["arrhythmia_flag"] = getattr(processed, "arrhythmia_flag", False)
+        device["sdnn"] = getattr(processed, "sdnn", 0.0)
+        device["rmssd"] = getattr(processed, "rmssd", 0.0)
+        device["pnn50"] = getattr(processed, "pnn50", 0.0)
 
         # Server-side vitals extraction (supplement firmware vitals)
         # GitHub #7: presence < 0.15 = 노이즈 구간 → 이전 프레임 잔류값 초기화
@@ -1321,6 +1439,26 @@ async def camera_detections(body: dict):
     # Record camera detection timestamp for staleness check (Phase 5-3)
     runtime._camera_detection_ts = _time.monotonic()
 
+    # MERIDIAN: 카메라 모달리티 품질 점수 업데이트
+    avg_confidence = (
+        sum(d.get("confidence", 0.0) for d in detections) / len(detections)
+        if detections else 0.0
+    )
+    _get_meridian().update_camera(
+        person_count=person_count,
+        confidence=avg_confidence,
+    )
+    # TODO(Phase 5): multistatic 데이터 수신 시 여기서 호출
+    # _get_meridian().update_multistatic(
+    #     spatial_resolution_gain=<gain_from_multistatic_payload>,
+    #     link_count=<active_link_count>,
+    # )
+    # TODO(Phase 5): RF 토모그래피 데이터 수신 시 여기서 호출
+    # _get_meridian().update_rf_tomography(
+    #     occupied_cells=<occupied_cells_from_rf_grid>,
+    #     max_value=<max_grid_value>,
+    # )
+
     # Store camera data per zone (distribute based on detection floor positions)
     # Reset all zones first
     for z in runtime.zones:
@@ -1714,10 +1852,47 @@ async def gait_analysis():
 async def analytics_paths():
     """리테일 경로 분석 — 존 간 이동 경로."""
     zones = runtime.zones
+    zone_count = len(zones)
+
+    # Current zone presence snapshot from actual zone data
+    zone_presence: dict[str, int] = {z["id"]: z.get("presenceCount", 0) for z in zones}
+    zone_names: dict[str, str] = {z["id"]: z["name"] for z in zones}
+    zone_ids = [z["id"] for z in zones]
+
+    # Build transitions: all zone pairs where at least one side has presence
+    transitions = []
+    for i, from_id in enumerate(zone_ids):
+        for to_id in zone_ids[i + 1:]:
+            from_count = zone_presence.get(from_id, 0)
+            to_count = zone_presence.get(to_id, 0)
+            if from_count > 0 or to_count > 0:
+                transitions.append({
+                    "from_zone": from_id,
+                    "from_name": zone_names.get(from_id, from_id),
+                    "to_zone": to_id,
+                    "to_name": zone_names.get(to_id, to_id),
+                    # co-present count: people in both zones simultaneously
+                    "count": min(from_count, to_count) if (from_count > 0 and to_count > 0) else 0,
+                    "from_presence": from_count,
+                    "to_presence": to_count,
+                })
+
+    # Per-device current zone assignment
+    device_paths = [
+        {
+            "device_id": d["id"],
+            "zone_id": d.get("zone_id"),
+            "last_seen": d.get("lastSeen"),
+        }
+        for d in runtime.devices.values()
+        if d.get("status") == "online" and d.get("zone_id")
+    ]
+
     return {
-        "zone_count": len(zones),
-        "transitions": [],
-        "message": "리테일 경로 분석 - Phase B 구현",
+        "zone_count": zone_count,
+        "transitions": transitions,
+        "device_paths": device_paths,
+        "zone_presence": zone_presence,
     }
 
 
@@ -1738,11 +1913,36 @@ async def analytics_heatmap():
 
 @app.get("/api/analytics/queue")
 async def analytics_queue():
-    """대기열 분석."""
+    """대기열 분석 — 존별 현재 재실 인원 기반 대기열 추정."""
+    # Derive queue metrics from actual zone presence counts
+    total_presence = sum(z.get("presenceCount", 0) for z in runtime.zones)
+    # Identify the zone with highest current load as the primary queue point
+    busiest_zone = max(runtime.zones, key=lambda z: z.get("presenceCount", 0), default=None)
+    busiest_count = busiest_zone["presenceCount"] if busiest_zone else 0
+    busiest_name = busiest_zone["name"] if busiest_zone else None
+
+    # Simple wait estimate: assume 30 seconds average service time per person in queue
+    AVG_SERVICE_SECONDS = 30
+    queue_length = max(0, busiest_count - 1)  # first person is being served
+    estimated_wait = queue_length * AVG_SERVICE_SECONDS
+
+    # Per-zone queue breakdown
+    zone_queues = [
+        {
+            "zone_id": z["id"],
+            "zone_name": z["name"],
+            "queue_length": max(0, z.get("presenceCount", 0) - 1),
+            "presence_count": z.get("presenceCount", 0),
+        }
+        for z in runtime.zones
+    ]
+
     return {
-        "queue_length": 0,
-        "estimated_wait_seconds": 0,
-        "message": "대기열 분석 - Phase B 구현",
+        "queue_length": queue_length,
+        "total_presence": total_presence,
+        "estimated_wait_seconds": estimated_wait,
+        "busiest_zone": busiest_name,
+        "zones": zone_queues,
     }
 
 

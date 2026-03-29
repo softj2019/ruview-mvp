@@ -1,26 +1,42 @@
 """
-SpotFi 기반 AoA(도래각) 추정 + 다중 노드 삼각측량으로 위치 추정.
+SpotFi-inspired 위치 추정 — ESP32-S3 단일 안테나 최적화.
 
-ESP32-S3 단일 안테나 제약으로 순수 AoA 불가.
-대신: 다중 노드의 CSI 위상 차이 → 상대 AoA → 삼각측량 → 위치 추정.
+단일 안테나 제약:
+  - 순수 AoA 불가 (복수 안테나 필요)
+  - 대신: CSI 진폭 기반 거리 추정 + 최소자승 삼각측량
 
 알고리즘:
-1. 노드 쌍(i,j)의 위상 차이 Δφ = φ_i - φ_j
-2. 위상 차이로부터 상대 도래각 추정: θ = arcsin(Δφ * λ / (2π * d))
-   (d = 노드 간 거리, λ = 파장)
-3. 각 노드 쌍의 방향각 선 교차점 → 위치 추정
-4. 다중 교차점의 가중 평균 (신호 품질 가중치)
+1. 진폭 → Friis 경로손실 모델로 거리 추정
+2. Phase slope (dφ/dk) → TOA → 거리 보정
+3. 최소자승 삼각측량으로 위치 추정
+4. Residual 기반 신뢰도 계산
+
+참조:
+  SpotFi: Kotaru et al., SIGCOMM 2015
+  FILA: Liu et al., INFOCOM 2012
+  IEEE 802.11az Next Generation Positioning
 """
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+try:
+    from scipy.optimize import minimize as _scipy_minimize
+    _SCIPY_AVAILABLE = True
+except ImportError:
+    _SCIPY_AVAILABLE = False
 
-WIFI_FREQ_HZ = 5.8e9          # 5.8 GHz
+WIFI_FREQ_HZ = 5.8e9
 SPEED_OF_LIGHT = 3e8
 WAVELENGTH = SPEED_OF_LIGHT / WIFI_FREQ_HZ   # ~0.052m
+SUBCARRIER_SPACING_HZ = 312_500.0             # 802.11n/ac 서브캐리어 간격
+FLOOR_W_METERS = 10.0                         # 800px = 10m
+PIXELS_PER_METER = 80.0                       # 800/10
+PATH_LOSS_EXP = 2.5                           # 실내 경로손실 지수
+REF_DISTANCE_M = 1.0                          # 기준 거리 1m
+REF_AMPLITUDE = 1.0                           # 기준 진폭 (정규화)
 
 
 @dataclass
@@ -28,154 +44,148 @@ class NodePhaseData:
     node_id: str
     x: float           # 플로어맵 픽셀 (0-800)
     y: float           # 플로어맵 픽셀 (0-400)
-    phase_mean: float  # 평균 위상 (라디안)
-    amplitude: float
+    phase_mean: float  # 원형 평균 위상 (라디안)
+    phase_slope: float # 서브캐리어 위상 기울기 (TOA 추정용)
+    amplitude: float   # 평균 진폭
+    dist_estimate: float  # 진폭 기반 거리 추정 (m)
     timestamp: float
 
 
 @dataclass
 class PositionEstimate:
-    x: float           # 추정 위치 픽셀
+    x: float
     y: float
-    confidence: float  # 0~1
-    method: str        # "triangulation" | "single_node" | "fallback"
+    confidence: float
+    method: str
     contributing_nodes: int
 
 
 class AoAEstimator:
-    """다중 노드 위상 차이 기반 위치 추정."""
+    """단일 안테나 ESP32-S3용 CSI 기반 위치 추정."""
 
     FLOOR_W = 800.0
     FLOOR_H = 400.0
-    NODE_SEPARATION = 0.5   # 노드 간 가상 안테나 간격 (m)
 
     def __init__(self, data_ttl: float = 3.0):
         self.data_ttl = data_ttl
         self._node_data: dict[str, NodePhaseData] = {}
 
+    def _estimate_distance(self, amplitudes: list[float]) -> float:
+        """Friis 경로손실 모델로 거리 추정."""
+        if not amplitudes:
+            return 5.0  # 기본값 5m
+        amp = float(np.median(np.abs(amplitudes)))
+        if amp < 1e-6:
+            return 5.0
+        # d = d0 * (A_ref / amp)^(1/n)
+        ratio = REF_AMPLITUDE / (amp + 1e-9)
+        dist = REF_DISTANCE_M * (ratio ** (1.0 / PATH_LOSS_EXP))
+        return float(np.clip(dist, 0.3, 12.0))  # 0.3m ~ 12m 클리핑
+
+    def _estimate_phase_slope(self, phases: list[float]) -> float:
+        """서브캐리어 위상 기울기 추정 (선형 회귀)."""
+        n = len(phases)
+        if n < 4:
+            return 0.0
+        x = np.arange(n, dtype=float)
+        y = np.unwrap(np.array(phases, dtype=float))
+        # 선형 회귀: y = slope * x + intercept
+        slope = float(np.polyfit(x, y, 1)[0])
+        return slope
+
     def update_node(self, node_id: str, x: float, y: float,
                     phases: list[float], amplitudes: list[float]) -> None:
-        """노드 위상/진폭 데이터 업데이트."""
-        if not phases:
+        if not phases and not amplitudes:
             return
-        phase_mean = float(np.angle(np.mean(np.exp(1j * np.array(phases)))))
+        phase_mean = float(np.angle(np.mean(np.exp(1j * np.array(phases))))) if phases else 0.0
+        phase_slope = self._estimate_phase_slope(phases)
         amp_mean = float(np.mean(np.abs(amplitudes))) if amplitudes else 0.0
+        dist = self._estimate_distance(amplitudes)
+
+        # Phase slope으로 TOA 보정: τ = -slope / (2π * Δf)
+        if abs(phase_slope) > 1e-6:
+            toa_sec = -phase_slope / (2 * math.pi * SUBCARRIER_SPACING_HZ)
+            toa_dist = abs(toa_sec) * SPEED_OF_LIGHT
+            # 앙상블: 진폭 추정 70% + TOA 추정 30% (TOA 신뢰도 낮음)
+            if 0.3 <= toa_dist <= 12.0:
+                dist = 0.7 * dist + 0.3 * toa_dist
+
         self._node_data[node_id] = NodePhaseData(
             node_id=node_id, x=x, y=y,
-            phase_mean=phase_mean, amplitude=amp_mean,
+            phase_mean=phase_mean, phase_slope=phase_slope,
+            amplitude=amp_mean, dist_estimate=dist,
             timestamp=time.monotonic()
         )
 
+    def _trilaterate(self, nodes: list[NodePhaseData]) -> tuple[float, float, float]:
+        """비선형 최소자승 삼각측량. 반환: (x_m, y_m, residual)
+
+        scipy 사용 시: Nelder-Mead 비선형 최적화 (정확도 우선)
+        scipy 없을 시: 진폭 가중 평균 fallback
+        """
+        scale = FLOOR_W_METERS / self.FLOOR_W
+        positions = np.array([[n.x * scale, n.y * scale] for n in nodes])
+        distances = np.array([n.dist_estimate for n in nodes])
+        amplitudes = np.array([n.amplitude for n in nodes])
+        weights = amplitudes / (amplitudes.sum() + 1e-9)
+
+        # 초기 추정값: 진폭 가중 평균 (중심 근처 수렴)
+        x_init = float(np.average(positions[:, 0], weights=weights))
+        y_init = float(np.average(positions[:, 1], weights=weights))
+
+        def cost(p: np.ndarray) -> float:
+            dists = np.sqrt((positions[:, 0] - p[0])**2 + (positions[:, 1] - p[1])**2)
+            return float(np.sum(weights * (dists - distances)**2))
+
+        if _SCIPY_AVAILABLE:
+            try:
+                res = _scipy_minimize(cost, [x_init, y_init], method="Nelder-Mead",
+                                      options={"xatol": 0.05, "fatol": 1e-4, "maxiter": 500})
+                x_m, y_m = float(res.x[0]), float(res.x[1])
+                dists_est = np.sqrt((positions[:, 0] - x_m)**2 + (positions[:, 1] - y_m)**2)
+                residual = float(np.sqrt(np.mean((dists_est - distances)**2)))
+                return x_m, y_m, residual
+            except Exception:
+                pass
+
+        # fallback: 진폭 가중 평균 (scipy 없거나 최적화 실패 시)
+        return x_init, y_init, 999.0
+
     def estimate_position(self) -> PositionEstimate:
-        """현재 데이터로 위치 추정."""
         now = time.monotonic()
         active = {k: v for k, v in self._node_data.items()
                   if now - v.timestamp < self.data_ttl and v.amplitude > 0.01}
 
-        if len(active) < 2:
-            # 노드 1개: 노드 위치를 반환 (fallback)
-            if active:
-                nd = next(iter(active.values()))
-                return PositionEstimate(x=nd.x, y=nd.y, confidence=0.1,
-                                        method="fallback", contributing_nodes=1)
+        if not active:
             return PositionEstimate(x=400.0, y=200.0, confidence=0.0,
                                     method="fallback", contributing_nodes=0)
-
-        # 노드 쌍별 위상 차이 → 상대 AoA → 방향선
-        intersection_points: list[tuple[float, float]] = []
-        weights: list[float] = []
+        if len(active) == 1:
+            nd = next(iter(active.values()))
+            return PositionEstimate(x=nd.x, y=nd.y, confidence=0.1,
+                                    method="single_node", contributing_nodes=1)
 
         nodes = list(active.values())
-        for i in range(len(nodes)):
-            for j in range(i + 1, len(nodes)):
-                ni, nj = nodes[i], nodes[j]
-                result = self._pairwise_intersection(ni, nj)
-                if result is not None:
-                    px, py, w = result
-                    if 0 <= px <= self.FLOOR_W and 0 <= py <= self.FLOOR_H:
-                        intersection_points.append((px, py))
-                        weights.append(w)
+        # 진폭 내림차순 정렬 → 신뢰도 높은 노드 우선
+        nodes.sort(key=lambda n: n.amplitude, reverse=True)
 
-        if not intersection_points:
-            # 진폭 가중 평균 위치
-            pts = np.array([[n.x, n.y] for n in nodes])
-            ws = np.array([n.amplitude for n in nodes])
-            ws /= ws.sum() + 1e-9
-            cx, cy = (pts * ws[:, None]).sum(axis=0)
-            return PositionEstimate(x=float(cx), y=float(cy), confidence=0.2,
-                                    method="single_node", contributing_nodes=len(nodes))
+        x_m, y_m, residual = self._trilaterate(nodes)
+        scale = FLOOR_W_METERS / self.FLOOR_W
+        x_pix = float(np.clip(x_m / scale, 0, self.FLOOR_W))
+        y_pix = float(np.clip(y_m / scale, 0, self.FLOOR_H))
 
-        pts = np.array(intersection_points)
-        ws = np.array(weights)
-        ws /= ws.sum() + 1e-9
-        cx, cy = (pts * ws[:, None]).sum(axis=0)
+        # 신뢰도: residual 기반 (작을수록 좋음) + 노드 수 보너스
+        node_bonus = min(0.2, (len(nodes) - 2) * 0.05)
+        confidence = float(np.clip(math.exp(-residual / 2.0) + node_bonus, 0.0, 1.0))
 
-        # 신뢰도: 교차점 밀집도 (분산 역수)
-        spread = float(np.sqrt(np.var(pts[:, 0]) + np.var(pts[:, 1])))
-        confidence = float(np.clip(1.0 / (1.0 + spread / 100.0), 0.0, 1.0))
-
+        method = "triangulation" if len(nodes) >= 3 else "two_node"
         return PositionEstimate(
-            x=float(cx), y=float(cy),
+            x=x_pix, y=y_pix,
             confidence=round(confidence, 3),
-            method="triangulation",
+            method=method,
             contributing_nodes=len(nodes)
         )
 
-    def _pairwise_intersection(self, ni: NodePhaseData, nj: NodePhaseData
-                                ) -> Optional[tuple[float, float, float]]:
-        """두 노드 위상 차이로 교차점 (x, y, weight) 계산."""
-        try:
-            # 픽셀→미터 변환 (800px = 10m 가정)
-            scale = 10.0 / self.FLOOR_W
-            xi, yi = ni.x * scale, ni.y * scale
-            xj, yj = nj.x * scale, nj.y * scale
-
-            # 노드 간 방향각
-            dx, dy = xj - xi, yj - yi
-            baseline_angle = math.atan2(dy, dx)
-            baseline_len = math.sqrt(dx ** 2 + dy ** 2) + 1e-6
-
-            # 위상 차이 → AoA (단순 근사)
-            delta_phi = ni.phase_mean - nj.phase_mean
-            delta_phi = (delta_phi + math.pi) % (2 * math.pi) - math.pi  # [-π, π] 정규화
-            sin_arg = float(np.clip(
-                delta_phi * WAVELENGTH / (2 * math.pi * self.NODE_SEPARATION),
-                -1.0, 1.0
-            ))
-            aoa_i = math.asin(sin_arg)
-
-            # 노드 i에서 방향각 = baseline_angle + aoa_i 방향 직선
-            # 노드 j에서 방향각 = baseline_angle + π - aoa_i
-            angle_i = baseline_angle + aoa_i
-            angle_j = baseline_angle + math.pi - aoa_i
-
-            # 두 직선 교차점
-            # 직선: P = (xi,yi) + t*(cos(ai), sin(ai))
-            #       Q = (xj,yj) + s*(cos(aj), sin(aj))
-            cos_i, sin_i = math.cos(angle_i), math.sin(angle_i)
-            cos_j, sin_j = math.cos(angle_j), math.sin(angle_j)
-
-            # 크라머 법칙
-            det = cos_i * (-sin_j) - sin_i * (-cos_j)
-            if abs(det) < 1e-6:
-                return None
-            t = ((xj - xi) * (-sin_j) - (yj - yi) * (-cos_j)) / det
-            px = xi + t * cos_i
-            py = yi + t * sin_i
-
-            # 미터 → 픽셀
-            px_pix = px / scale
-            py_pix = py / scale
-
-            # 신뢰도 가중치 = 두 노드 진폭 곱 * baseline 길이 역수
-            weight = (ni.amplitude * nj.amplitude) / (baseline_len + 0.1)
-
-            return (px_pix, py_pix, weight)
-        except Exception:
-            return None
-
     def get_all_estimates(self) -> dict:
-        """전체 추정 결과 직렬화."""
         est = self.estimate_position()
         now = time.monotonic()
         active = {k: v for k, v in self._node_data.items()
@@ -188,7 +198,9 @@ class AoAEstimator:
             "active_nodes": len(active),
             "node_data": [
                 {"id": n.node_id, "x": n.x, "y": n.y,
-                 "amplitude": round(n.amplitude, 3), "phase": round(n.phase_mean, 3)}
+                 "amplitude": round(n.amplitude, 3),
+                 "phase": round(n.phase_mean, 3),
+                 "dist_m": round(n.dist_estimate, 2)}
                 for n in active.values()
             ]
         }
