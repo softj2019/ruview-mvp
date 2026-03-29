@@ -5,22 +5,36 @@ import { cn } from '@/lib/utils';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { NightModeToggle } from '@/components/ui/NightModeToggle';
 
-const navItems: { to: string; label: string; icon: typeof LayoutDashboard; external?: boolean }[] = [
+type NavItem =
+  | { type?: 'link'; to: string; label: string; icon: typeof LayoutDashboard; external?: boolean }
+  | { type: 'divider'; label: string };
+
+const navItems: NavItem[] = [
+  // ── 모니터링
+  { type: 'divider', label: '모니터링' },
   { to: '/', label: '대시보드', icon: LayoutDashboard },
-  { to: '/devices', label: '디바이스', icon: Cpu },
   { to: '/events', label: '이벤트', icon: Bell },
-  { to: '/sensing', label: '센싱', icon: Radio },
+  { to: '/devices', label: '디바이스', icon: Cpu },
+  // ── 감지 / 분석
+  { type: 'divider', label: '감지 · 분석' },
+  { to: '/sensing', label: 'WiFi 센싱', icon: Radio },
+  { to: '/rf-tomography', label: 'RF 히트맵', icon: Layers },
   { to: '/pose-fusion', label: '포즈 융합', icon: GitMerge },
-  { to: '/hardware', label: '하드웨어', icon: HardDrive },
-  { to: '/live-demo', label: '라이브 데모', icon: Play },
+  { to: '/sleep', label: '수면 모니터', icon: Moon },
+  { to: '/analytics', label: '공간 분석', icon: TrendingUp },
+  // ── 시각화
+  { type: 'divider', label: '시각화' },
   { to: '/observatory', label: '3D 관측소', icon: Globe },
   { to: '/building', label: '건물 관제', icon: Building2 },
   { to: '/viz', label: '시각화', icon: BarChart2 },
+  // ── 관리
+  { type: 'divider', label: '관리' },
   { to: '/residents', label: '입주자', icon: Users },
-  { to: '/rf-tomography', label: 'RF 히트맵', icon: Layers },
-  { to: '/sleep', label: '수면 모니터', icon: Moon },
-  { to: '/analytics', label: '공간 분석', icon: TrendingUp },
   { to: '/reports', label: '리포트', icon: FileText },
+  // ── 개발 도구
+  { type: 'divider', label: '개발 도구' },
+  { to: '/hardware', label: '하드웨어', icon: HardDrive },
+  { to: '/live-demo', label: '라이브 데모', icon: Play },
   { to: '/settings', label: '설정', icon: Settings },
 ];
 
@@ -46,22 +60,23 @@ export default function Sidebar() {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 space-y-1 px-3 py-4 overflow-y-auto">
-        {navItems.map(({ to, label, icon: Icon, external }) => {
+      <nav className="flex-1 px-3 py-3 overflow-y-auto space-y-0.5">
+        {navItems.map((item, i) => {
+          if (item.type === 'divider') {
+            return (
+              <div key={`div-${i}`} className="pt-3 pb-1 px-3">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-gray-600">{item.label}</p>
+              </div>
+            );
+          }
+          const { to, label, icon: Icon, external } = item;
           const active = location.pathname === to;
           const cls = cn(
             'flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium transition-colors hover:bg-gray-800/50',
-            active
-              ? 'text-cyan-400'
-              : 'text-gray-400 hover:text-gray-200',
+            active ? 'bg-gray-800/60 text-cyan-400' : 'text-gray-400 hover:text-gray-200',
           );
           if (external) {
-            return (
-              <a key={to} href={to} className={cls}>
-                <Icon className="h-4 w-4" />
-                {label}
-              </a>
-            );
+            return <a key={to} href={to} className={cls}><Icon className="h-4 w-4" />{label}</a>;
           }
           return (
             <Link key={to} to={to} className={cls} onClick={() => setMobileOpen(false)}>
