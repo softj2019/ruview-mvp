@@ -850,6 +850,12 @@ class SignalAdapterRuntime:
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.presence_score
 
+        # AoA 위치 추정용 위상/진폭 데이터 저장 (최대 64 서브캐리어)
+        _amp_full = processed.amplitude or []
+        _phase_full = processed.phase if hasattr(processed, 'phase') else []
+        device["csi_amplitudes"] = _amp_full[:64] if _amp_full else []
+        device["csi_phases"] = _phase_full[:64] if _phase_full else []
+
         # Multi-person separation from CSI subcarrier clustering
         # estimated_persons=0 일 때도 반드시 덮어써야 이전 프레임 값이 잔존하지 않음
         device["csi_estimated_persons"] = processed.estimated_persons
@@ -1846,16 +1852,14 @@ async def aoa_position():
         phases = d.get("csi_phases", []) or []
         amplitudes_raw = d.get("csi_amplitudes", []) or []
         if not phases or not amplitudes_raw:
-            # csi_phases/amplitudes 미제공 시 RSSI + motion_energy 대체 사용
+            # csi_phases/amplitudes 미수신 시 RSSI + motion_energy 프록시 사용
+            import math
             rssi = float(d.get("signalStrength") or -90)
-            amp = 10 ** ((rssi + 90) / 20.0)  # RSSI → 선형 진폭 (0~1 범위)
+            amp = 10 ** ((rssi + 90) / 20.0)
             motion = float(d.get("motion_energy") or 0)
             presence = float(d.get("presence_score") or 0)
-            # presence_score를 위상 프록시로 사용 (0~2π 매핑)
-            import math
-            phase_proxy = presence * math.pi * 2
-            phases = [phase_proxy]
-            amplitudes_raw = [amp * (1 + motion)]
+            phases = [presence * math.pi * 2]
+            amplitudes_raw = [amp * (1.0 + motion)]
         runtime._aoa_estimator.update_node(
             node_id=d["id"],
             x=float(d.get("x") or 0),
