@@ -43,6 +43,8 @@ try:
     from .phase_sanitizer import PhaseSanitizer
     from .metrics_service import MetricsService
     from .stream_service import StreamService
+    from .viewpoint_fusion import ViewpointFusion, NodeFeature
+    from .person_tracker import PersonTracker
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
@@ -59,6 +61,8 @@ except ImportError:
     from phase_sanitizer import PhaseSanitizer
     from metrics_service import MetricsService
     from stream_service import StreamService
+    from viewpoint_fusion import ViewpointFusion, NodeFeature
+    from person_tracker import PersonTracker
 
 from health_check_service import HealthCheckService
 from orchestrator_service import OrchestratorService
@@ -277,6 +281,10 @@ class SignalAdapterRuntime:
         # Metrics collection and stream buffering
         self.metrics_service = MetricsService()
         self.stream_service = StreamService()
+        # ADR-031: ViewpointFusion — cross-viewpoint geometric attention fusion
+        self.viewpoint_fusion = ViewpointFusion()
+        # ADR-029: PersonTracker — DynamicMinCut 다인 위치 추적
+        self.person_tracker = PersonTracker()
         # Runtime-settable configuration (overridable via /api/v1/settings/*)
         self._settings: dict[str, Any] = {
             "fall_detection_threshold": 8.0,
@@ -1006,6 +1014,27 @@ class SignalAdapterRuntime:
         # Track per-device CSI metrics
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.presence_score
+
+        # ADR-031: ViewpointFusion — update this node's feature vector
+        self.viewpoint_fusion.update_node(NodeFeature(
+            node_id=node_id if isinstance(node_id, str) else device["id"],
+            x=device.get("x", 400),
+            y=device.get("y", 200),
+            motion_index=processed.motion_index,
+            amplitude=float(np.mean(np.abs(processed.amplitude or [0]))),
+            phase_slope=device.get("phase_slope", 0.0),
+            presence_score=device.get("presence_score", 0.0),
+            timestamp=_time.monotonic(),
+        ))
+
+        # ADR-029: PersonTracker — 노드 신호 업데이트
+        self.person_tracker.update_node(
+            node_id if isinstance(node_id, str) else device["id"],
+            device.get("x", 400), device.get("y", 200),
+            processed.motion_index,
+            float(np.mean(np.abs(processed.amplitude or [0]))),
+            device.get("presence_score", 0.0),
+        )
 
         # Phase sanitization: unwrap → remove outliers → smooth
         if processed.phase:
@@ -2353,3 +2382,21 @@ async def meridian_status():
 async def meridian_weights():
     """MERIDIAN — 모달리티별 퓨전 가중치 (합산 1.0) 반환."""
     return {"weights": _get_meridian().get_fusion_weights()}
+
+
+@app.get("/api/fusion/viewpoint")
+async def viewpoint_fusion_status():
+    """ADR-031 ViewpointFusion — 6노드 기하학적 어텐션 융합 상태 반환."""
+    return runtime.viewpoint_fusion.get_status()
+
+
+@app.get("/api/tracking/persons")
+async def tracking_persons():
+    """ADR-029 DynamicMinCut 다인 위치 추적 결과."""
+    online = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    person_count = max(
+        (d.get("person_count_estimate", 0) for d in online),
+        default=0,
+    )
+    runtime.person_tracker.estimate_persons(int(person_count))
+    return runtime.person_tracker.get_status()

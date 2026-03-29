@@ -14,6 +14,7 @@ import { Badge } from '@/components/ui/Badge';
 import { useDeviceStore, type Device } from '@/stores/deviceStore';
 import { useZoneStore } from '@/stores/zoneStore';
 import { useSignalStore } from '@/stores/signalStore';
+import { SignalViz } from '@/components/SignalViz';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -519,6 +520,17 @@ export default function SensingPage() {
         <CardHeader>Zone Presence Overview</CardHeader>
         <CardContent>
           <ZonePresenceChart />
+        </CardContent>
+      </Card>
+
+      {/* CSI Signal Visualization */}
+      <Card variant="glow">
+        <CardHeader>CSI 신호 분석</CardHeader>
+        <CardContent>
+          <SignalViz
+            deviceId={devices.length > 0 ? devices[0].name : undefined}
+            demoMode
+          />
         </CardContent>
       </Card>
 
