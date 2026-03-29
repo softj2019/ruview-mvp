@@ -1845,11 +1845,17 @@ async def aoa_position():
     for d in online:
         phases = d.get("csi_phases", []) or []
         amplitudes_raw = d.get("csi_amplitudes", []) or []
-        if not phases and not amplitudes_raw:
-            # 위상 없으면 진폭으로 합성
-            amp = float(d.get("csi_amplitude") or 0)
-            phases = [amp * 0.1]  # 더미 위상
-            amplitudes_raw = [amp]
+        if not phases or not amplitudes_raw:
+            # csi_phases/amplitudes 미제공 시 RSSI + motion_energy 대체 사용
+            rssi = float(d.get("signalStrength") or -90)
+            amp = 10 ** ((rssi + 90) / 20.0)  # RSSI → 선형 진폭 (0~1 범위)
+            motion = float(d.get("motion_energy") or 0)
+            presence = float(d.get("presence_score") or 0)
+            # presence_score를 위상 프록시로 사용 (0~2π 매핑)
+            import math
+            phase_proxy = presence * math.pi * 2
+            phases = [phase_proxy]
+            amplitudes_raw = [amp * (1 + motion)]
         runtime._aoa_estimator.update_node(
             node_id=d["id"],
             x=float(d.get("x") or 0),
