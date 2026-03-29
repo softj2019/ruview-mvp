@@ -215,7 +215,7 @@ class SignalAdapterRuntime:
         # 시간적 일관성 필터: 연속 N프레임 z>0 유지 시에만 presenceCount 증가
         # 단발성 RF 스파이크 제거 (weekend_learner p99 분석 결과)
         self._presence_streak: dict = {}   # device_id -> 연속 z>0 프레임 수
-        PRESENCE_STREAK_REQUIRED = 3       # 연속 3프레임 (≈1.5초) 유지 필요
+        PRESENCE_STREAK_REQUIRED = 2       # 연속 2프레임 (≈1초) 유지 필요
         self._PRESENCE_STREAK_REQUIRED = PRESENCE_STREAK_REQUIRED
         # Kalman filter for presenceCount smoothing (Phase 5-3)
         self._kalman = KalmanSmooth(process_noise=0.5, measurement_noise=2.0)
@@ -321,19 +321,31 @@ class SignalAdapterRuntime:
 
             tracker = self._presence_welford[did]
 
-            # Calibration phase: first 60 samples
+            # 절대 임계값 bypass: 신호가 충분히 강하면 캘리브레이션 없이 즉시 감지
+            ABSOLUTE_PRESENCE_THRESHOLD = 0.20
+            if score > ABSOLUTE_PRESENCE_THRESHOLD:
+                streak = self._presence_streak.get(did, 0) + 1
+                self._presence_streak[did] = streak
+                if streak >= self._PRESENCE_STREAK_REQUIRED:
+                    nodes_with_presence += 1
+                    dev["_presence_z"] = score  # absolute 모드: score 자체를 z로 사용
+                else:
+                    dev["_presence_z"] = 0.0
+                continue
+
+            # Calibration phase: first 20 samples (~10초)
             if not tracker["calibrated"]:
                 tracker["stats"].update(score)
-                if tracker["stats"].count >= 60:
+                if tracker["stats"].count >= 20:
                     tracker["calibrated"] = True
-                    # 5σ + 절대 최소 마진 0.05 — std가 너무 작을 때 false positive 방지
-                    raw_thr = tracker["stats"].mean + 5.0 * tracker["stats"].std()
-                    tracker["threshold"] = max(raw_thr, tracker["stats"].mean + 0.05)
+                    # 1.5σ + 절대 최소 마진 0.02 — 실내 1인 감지 민감도 최적화
+                    raw_thr = tracker["stats"].mean + 1.5 * tracker["stats"].std()
+                    tracker["threshold"] = max(raw_thr, tracker["stats"].mean + 0.02)
                     dev["_presence_baseline"] = tracker["stats"].mean
                     dev["_presence_threshold"] = tracker["threshold"]
                 continue
 
-            # Detection: score above calibrated threshold
+            # Detection: score above calibrated threshold (1.5σ로 완화)
             # weekend_learner p99 분석: 단발 스파이크 제거 — 연속 N프레임 유지 필요
             if score > tracker["threshold"]:
                 streak = self._presence_streak.get(did, 0) + 1
@@ -349,6 +361,28 @@ class SignalAdapterRuntime:
 
             # Slow threshold drift (don't corrupt Welford stats)
             tracker["threshold"] = tracker["threshold"] * 0.999 + score * 0.001
+
+        # 크로스-노드 상대 감지: 한 노드가 전체 중앙값 대비 10% 이상 높으면 재실 감지
+        # Welford 캘리브레이션 없이도 동작 — 환경 노이즈에 강인
+        online_scores = [
+            (dev["id"], dev.get("presence_score", 0))
+            for dev in self.devices.values()
+            if dev.get("status") == "online" and dev.get("presence_score", 0) > 0
+        ]
+        if len(online_scores) >= 2:
+            scores_only = sorted([s for _, s in online_scores])
+            mid = len(scores_only) // 2
+            peer_median = (scores_only[mid - 1] + scores_only[mid]) / 2 if len(scores_only) % 2 == 0 else scores_only[mid]
+            for did, score in online_scores:
+                dev = self.devices.get(did, {})
+                if score > peer_median * 1.10 and dev.get("_presence_z", 0) == 0:
+                    streak = self._presence_streak.get(f"rel_{did}", 0) + 1
+                    self._presence_streak[f"rel_{did}"] = streak
+                    if streak >= self._PRESENCE_STREAK_REQUIRED:
+                        dev["_presence_z"] = score / peer_median  # 상대 비율을 z로 사용
+                        nodes_with_presence += 1
+                else:
+                    self._presence_streak[f"rel_{did}"] = 0
 
         # Count nodes with valid breathing ONLY if Welford also confirms presence
         # (prevents false positives from WiFi noise in empty rooms)
