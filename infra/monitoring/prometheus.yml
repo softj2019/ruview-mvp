@@ -9,7 +9,12 @@ global:
 rule_files:
   - "alerting-rules.yml"
 
-# Alertmanager (선택 — 별도 배포 시 활성화)
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Alertmanager (별도 배포 시 targets에 'alertmanager:9093' 추가)
 # alerting:
 #   alertmanagers:
 #     - static_configs:

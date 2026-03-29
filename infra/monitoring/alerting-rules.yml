@@ -186,3 +186,42 @@ groups:
         annotations:
           summary: "signal-adapter 메모리 사용 초과"
           description: "현재 메모리 사용 {{ $value | humanize1024 }}B (임계값 512MiB)."
+
+  # ─────────────────────────────────────────────────────────────
+  # 낙상 위험도 / 수면 무호흡 — 고급 건강 알림
+  # ─────────────────────────────────────────────────────────────
+  - name: ruview.health_advanced
+    rules:
+      # 낙상 확인 이벤트 (5분 내 발생)
+      - alert: FallConfirmed
+        expr: increase(ruview_events_total{event_type="fall_confirmed"}[5m]) > 0
+        labels:
+          severity: critical
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "낙상 확인 이벤트 발생"
+          description: "지난 5분 내 낙상 확인 이벤트가 감지되었습니다. 즉시 확인하세요."
+
+      # 수면 무호흡 반복 (10분 내 2회 초과)
+      - alert: ApneaDetected
+        expr: increase(ruview_events_total{event_type="apnea_detected"}[10m]) > 2
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "수면 무호흡 반복 감지"
+          description: "지난 10분 내 무호흡 이벤트 {{ $value }}건이 감지되었습니다."
+
+      # 높은 낙상 위험도 지속 (5분 이상 0.7 초과)
+      - alert: HighFallRisk
+        expr: ruview_fall_risk_avg > 0.7
+        for: 5m
+        labels:
+          severity: warning
+          service: signal-adapter
+          team: ops
+        annotations:
+          summary: "높은 낙상 위험도 지속"
+          description: "낙상 위험도 평균 {{ $value | humanizePercentage }}이 5분 이상 지속되고 있습니다."

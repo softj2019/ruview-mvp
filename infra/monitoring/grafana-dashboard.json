@@ -387,6 +387,132 @@
           }
         },
         "options": { "legend": { "displayMode": "list", "placement": "bottom" } }
+      },
+      {
+        "id": 40,
+        "title": "낙상 위험도 / 수면 분석",
+        "type": "row",
+        "gridPos": { "h": 1, "w": 24, "x": 0, "y": 33 },
+        "collapsed": false
+      },
+      {
+        "id": 41,
+        "title": "낙상 위험도 평균",
+        "type": "gauge",
+        "gridPos": { "h": 8, "w": 6, "x": 0, "y": 34 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "ruview_fall_risk_avg",
+            "legendFormat": "낙상 위험도",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 0.4 },
+                { "color": "orange", "value": 0.6 },
+                { "color": "red", "value": 0.75 }
+              ]
+            },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+      },
+      {
+        "id": 42,
+        "title": "수면 단계 분포",
+        "type": "piechart",
+        "gridPos": { "h": 8, "w": 9, "x": 6, "y": 34 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "ruview_sleep_stage_duration_seconds{stage=\"wake\"}",
+            "legendFormat": "Wake",
+            "refId": "A"
+          },
+          {
+            "expr": "ruview_sleep_stage_duration_seconds{stage=\"light\"}",
+            "legendFormat": "Light",
+            "refId": "B"
+          },
+          {
+            "expr": "ruview_sleep_stage_duration_seconds{stage=\"deep\"}",
+            "legendFormat": "Deep",
+            "refId": "C"
+          },
+          {
+            "expr": "ruview_sleep_stage_duration_seconds{stage=\"rem\"}",
+            "legendFormat": "REM",
+            "refId": "D"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "palette-classic" },
+            "unit": "s"
+          }
+        },
+        "options": { "legend": { "displayMode": "list", "placement": "right" }, "pieType": "donut" }
+      },
+      {
+        "id": 43,
+        "title": "무호흡 이벤트 / 시간",
+        "type": "stat",
+        "gridPos": { "h": 4, "w": 5, "x": 15, "y": 34 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "increase(ruview_events_total{event_type=\"apnea_detected\"}[1h])",
+            "legendFormat": "무호흡/시간",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "mode": "thresholds" },
+            "thresholds": {
+              "steps": [
+                { "color": "green", "value": 0 },
+                { "color": "yellow", "value": 3 },
+                { "color": "red", "value": 10 }
+              ]
+            },
+            "unit": "short"
+          }
+        },
+        "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "textMode": "auto", "colorMode": "background" }
+      },
+      {
+        "id": 44,
+        "title": "낙상 위험도 추이",
+        "type": "timeseries",
+        "gridPos": { "h": 8, "w": 4, "x": 20, "y": 34 },
+        "datasource": "Prometheus",
+        "targets": [
+          {
+            "expr": "ruview_fall_risk_avg",
+            "legendFormat": "위험도",
+            "refId": "A"
+          }
+        ],
+        "fieldConfig": {
+          "defaults": {
+            "color": { "fixedColor": "#f97316", "mode": "fixed" },
+            "custom": { "lineWidth": 2, "fillOpacity": 15 },
+            "unit": "percentunit",
+            "min": 0,
+            "max": 1
+          }
+        },
+        "options": { "legend": { "displayMode": "hidden" } }
       }
     ]
   },

@@ -287,6 +287,263 @@ pub fn classify_pose(motion: f32, doppler: Option<f32>) -> (&'static str, f32) {
 }
 
 // ---------------------------------------------------------------------------
+// Butterworth 2nd-order IIR bandpass filter
+// ---------------------------------------------------------------------------
+
+/// Butterworth 2nd-order IIR bandpass filter state.
+///
+/// Uses a bilinear-transform approximation to design a 2nd-order bandpass
+/// Butterworth IIR filter.  The design follows the standard Direct Form II
+/// transposed structure with pre-warped analogue corner frequencies.
+pub struct ButterworthBandpass {
+    b: [f64; 3],
+    a: [f64; 2], // a[1], a[2] (a[0] normalised to 1)
+    x_hist: [f64; 2],
+    y_hist: [f64; 2],
+}
+
+impl ButterworthBandpass {
+    /// Create a bandpass filter for the given `sample_rate` (Hz),
+    /// `low_hz` (lower −3 dB corner) and `high_hz` (upper −3 dB corner).
+    ///
+    /// The implementation derives the 2nd-order bandpass coefficients via
+    /// the bilinear transform with frequency pre-warping.
+    pub fn new(sample_rate: f64, low_hz: f64, high_hz: f64) -> Self {
+        let pi = core::f64::consts::PI;
+
+        // Pre-warp analogue frequencies.
+        let w_low = 2.0 * sample_rate * libm::tan(pi * low_hz / sample_rate);
+        let w_high = 2.0 * sample_rate * libm::tan(pi * high_hz / sample_rate);
+
+        let bw = w_high - w_low;           // analogue bandwidth
+        let w0 = libm::sqrt(w_low * w_high); // geometric centre frequency
+
+        // Bilinear transform for 2nd-order bandpass.
+        // Denominator coefficients (normalised, a0 = 1):
+        //   a0 = 4*fs^2 + 2*BW*fs + w0^2  (normalisation divisor)
+        //   a1 = 2*(w0^2 - 4*fs^2)
+        //   a2 = 4*fs^2 - 2*BW*fs + w0^2
+        let fs = sample_rate;
+        let a0 = 4.0 * fs * fs + 2.0 * bw * fs + w0 * w0;
+        let a1 = 2.0 * (w0 * w0 - 4.0 * fs * fs);
+        let a2 = 4.0 * fs * fs - 2.0 * bw * fs + w0 * w0;
+
+        // Numerator coefficients (bandpass: b0 = 2*BW*fs, b1 = 0, b2 = -b0)
+        let b0 = 2.0 * bw * fs / a0;
+        let b1 = 0.0;
+        let b2 = -b0;
+
+        Self {
+            b: [b0, b1, b2],
+            a: [a1 / a0, a2 / a0],
+            x_hist: [0.0; 2],
+            y_hist: [0.0; 2],
+        }
+    }
+
+    /// Filter a single sample using Direct Form II transposed IIR structure.
+    pub fn filter(&mut self, x: f64) -> f64 {
+        let y = self.b[0] * x
+            + self.b[1] * self.x_hist[0]
+            + self.b[2] * self.x_hist[1]
+            - self.a[0] * self.y_hist[0]
+            - self.a[1] * self.y_hist[1];
+
+        // Shift history buffers.
+        self.x_hist[1] = self.x_hist[0];
+        self.x_hist[0] = x;
+        self.y_hist[1] = self.y_hist[0];
+        self.y_hist[0] = y;
+
+        y
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Breathing envelope extraction
+// ---------------------------------------------------------------------------
+
+/// Extract breathing envelope amplitude from a signal window using RMS.
+///
+/// Computes the RMS (root-mean-square) over the full signal as an envelope
+/// estimate.  Returns a value in `[0.0, 1.0]` — the raw RMS normalised by
+/// the maximum possible value seen in the window.
+///
+/// Returns `0.0` for an empty slice.
+pub fn breathing_envelope(signal: &[f64], _sub_window: usize) -> f64 {
+    if signal.is_empty() {
+        return 0.0;
+    }
+    let sum_sq: f64 = signal.iter().map(|v| v * v).sum();
+    let rms = libm::sqrt(sum_sq / signal.len() as f64);
+
+    // Normalise by the peak absolute value so the result stays in [0, 1].
+    let peak = signal
+        .iter()
+        .map(|v| {
+            let av = if *v < 0.0 { -*v } else { *v };
+            av
+        })
+        .fold(0.0f64, f64::max);
+
+    if peak < 1e-12 {
+        0.0
+    } else {
+        let norm = rms / peak;
+        if norm > 1.0 { 1.0 } else { norm }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HRV metrics
+// ---------------------------------------------------------------------------
+
+/// HRV (heart-rate variability) metrics derived from inter-beat intervals.
+#[derive(Debug, Clone)]
+pub struct HrvMetrics {
+    /// Standard deviation of NN intervals (ms).
+    pub sdnn: f64,
+    /// Root mean square of successive differences (ms).
+    pub rmssd: f64,
+    /// Percentage of consecutive NN intervals differing by more than 50 ms.
+    pub pnn50: f64,
+}
+
+/// Compute HRV metrics from a series of inter-beat intervals (`ibi_ms`) in
+/// milliseconds.
+///
+/// Returns `None` if fewer than 4 IBI values are supplied (not enough data
+/// for meaningful HRV statistics).
+pub fn compute_hrv(ibi_ms: &[f64]) -> Option<HrvMetrics> {
+    if ibi_ms.len() < 4 {
+        return None;
+    }
+
+    let n = ibi_ms.len() as f64;
+
+    // SDNN — standard deviation of all NN intervals.
+    let mean = ibi_ms.iter().sum::<f64>() / n;
+    let variance = ibi_ms.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+    let sdnn = libm::sqrt(variance);
+
+    // RMSSD — root mean square of successive differences.
+    let m = ibi_ms.len() - 1;
+    let sq_diff_sum: f64 = (0..m)
+        .map(|i| {
+            let d = ibi_ms[i + 1] - ibi_ms[i];
+            d * d
+        })
+        .sum();
+    let rmssd = libm::sqrt(sq_diff_sum / m as f64);
+
+    // pNN50 — percentage of successive differences > 50 ms.
+    let nn50 = (0..m)
+        .filter(|&i| {
+            let d = ibi_ms[i + 1] - ibi_ms[i];
+            let ad = if d < 0.0 { -d } else { d };
+            ad > 50.0
+        })
+        .count();
+    let pnn50 = nn50 as f64 / m as f64 * 100.0;
+
+    Some(HrvMetrics { sdnn, rmssd, pnn50 })
+}
+
+// ---------------------------------------------------------------------------
+// Sleep stage classification
+// ---------------------------------------------------------------------------
+
+/// Sleep stage derived from motion and breathing parameters.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SleepStage {
+    Wake,
+    Light,
+    Deep,
+    Rem,
+    Unknown,
+}
+
+/// Classify sleep stage from motion and breathing parameters.
+///
+/// | Condition | Stage |
+/// |-----------|-------|
+/// | `motion_index > 0.3` | Wake |
+/// | `motion < 0.05` AND `breathing_variability > 3.0` | REM |
+/// | `motion < 0.05` AND `brv < 1.5` AND `8 < br < 15` | Deep |
+/// | otherwise | Light |
+pub fn classify_sleep_stage(
+    motion_index: f64,
+    breathing_rate: f64,
+    breathing_variability: f64,
+) -> SleepStage {
+    if motion_index > 0.3 {
+        SleepStage::Wake
+    } else if motion_index < 0.05 && breathing_variability > 3.0 {
+        SleepStage::Rem
+    } else if motion_index < 0.05
+        && breathing_variability < 1.5
+        && breathing_rate > 8.0
+        && breathing_rate < 15.0
+    {
+        SleepStage::Deep
+    } else {
+        SleepStage::Light
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fall risk score
+// ---------------------------------------------------------------------------
+
+/// Compute fall risk score in `[0.0, 1.0]` from gait parameters.
+///
+/// | Parameter | Contribution |
+/// |-----------|-------------|
+/// | `cadence < 80` steps/min | high risk (+0.5) |
+/// | `asymmetry > 0.2` | elevated (+0.3) |
+/// | `variability > 0.3` | elevated (+0.2) |
+///
+/// The contributions are weighted and clamped to `[0.0, 1.0]`.
+pub fn fall_risk_score(cadence: f64, asymmetry: f64, variability: f64) -> f64 {
+    let mut score = 0.0f64;
+
+    // Cadence contribution: linearly interpolate between 0 (cadence >= 100)
+    // and 0.5 (cadence <= 60).
+    if cadence < 100.0 {
+        let cadence_risk = if cadence <= 60.0 {
+            0.5
+        } else {
+            0.5 * (100.0 - cadence) / 40.0
+        };
+        score += cadence_risk;
+    }
+
+    // Asymmetry contribution: linearly interpolate between 0 (asym <= 0.1)
+    // and 0.3 (asym >= 0.4).
+    if asymmetry > 0.1 {
+        let asym_risk = if asymmetry >= 0.4 {
+            0.3
+        } else {
+            0.3 * (asymmetry - 0.1) / 0.3
+        };
+        score += asym_risk;
+    }
+
+    // Variability contribution: linearly interpolate between 0 (var <= 0.15)
+    // and 0.2 (var >= 0.45).
+    if variability > 0.15 {
+        let var_risk = if variability >= 0.45 {
+            0.2
+        } else {
+            0.2 * (variability - 0.15) / 0.3
+        };
+        score += var_risk;
+    }
+
+    if score > 1.0 { 1.0 } else { score }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -519,5 +776,145 @@ mod tests {
 
         let (pose, _) = classify_pose(0.70, None);
         assert_eq!(pose, "running");
+    }
+
+    // -- Breathing envelope -------------------------------------------------
+
+    #[test]
+    fn test_breathing_envelope_nonzero() {
+        // A simple sine-like signal should produce a non-zero envelope.
+        let signal: Vec<f64> = (0..100)
+            .map(|i| libm::sin(2.0 * core::f64::consts::PI * i as f64 / 20.0))
+            .collect();
+        let env = breathing_envelope(&signal, 10);
+        assert!(
+            env > 0.0 && env <= 1.0,
+            "envelope should be in (0, 1], got {}",
+            env
+        );
+    }
+
+    #[test]
+    fn test_breathing_envelope_empty() {
+        assert_eq!(breathing_envelope(&[], 10), 0.0);
+    }
+
+    // -- HRV ----------------------------------------------------------------
+
+    #[test]
+    fn test_compute_hrv_basic() {
+        // IBI series with known properties.
+        let ibi = vec![800.0, 810.0, 790.0, 820.0, 780.0, 805.0];
+        let hrv = compute_hrv(&ibi).expect("should return HRV for 6 IBIs");
+        // SDNN > 0 (there is variability)
+        assert!(hrv.sdnn > 0.0, "sdnn should be > 0, got {}", hrv.sdnn);
+        // RMSSD > 0
+        assert!(hrv.rmssd > 0.0, "rmssd should be > 0, got {}", hrv.rmssd);
+        // pNN50 in [0, 100]
+        assert!(
+            hrv.pnn50 >= 0.0 && hrv.pnn50 <= 100.0,
+            "pnn50 out of range: {}",
+            hrv.pnn50
+        );
+    }
+
+    #[test]
+    fn test_compute_hrv_too_short() {
+        assert!(compute_hrv(&[800.0, 810.0, 790.0]).is_none());
+        assert!(compute_hrv(&[]).is_none());
+    }
+
+    // -- Sleep stage --------------------------------------------------------
+
+    #[test]
+    fn test_sleep_stage_wake() {
+        let stage = classify_sleep_stage(0.5, 14.0, 2.0);
+        assert_eq!(stage, SleepStage::Wake);
+    }
+
+    #[test]
+    fn test_sleep_stage_deep() {
+        // Low motion, low variability, breathing in 8-15 range.
+        let stage = classify_sleep_stage(0.02, 12.0, 1.0);
+        assert_eq!(stage, SleepStage::Deep);
+    }
+
+    #[test]
+    fn test_sleep_stage_rem() {
+        // Very low motion but high breathing variability.
+        let stage = classify_sleep_stage(0.01, 14.0, 4.0);
+        assert_eq!(stage, SleepStage::Rem);
+    }
+
+    #[test]
+    fn test_sleep_stage_light() {
+        // Motion in between, doesn't fit other criteria.
+        let stage = classify_sleep_stage(0.1, 14.0, 2.0);
+        assert_eq!(stage, SleepStage::Light);
+    }
+
+    // -- Fall risk score ----------------------------------------------------
+
+    #[test]
+    fn test_fall_risk_high() {
+        // cadence well below 80, high asymmetry, high variability → high risk.
+        let score = fall_risk_score(50.0, 0.5, 0.5);
+        assert!(
+            score > 0.7,
+            "high-risk gait should score > 0.7, got {}",
+            score
+        );
+        assert!(score <= 1.0, "score capped at 1.0, got {}", score);
+    }
+
+    #[test]
+    fn test_fall_risk_low() {
+        // cadence = 110, asymmetry = 0.05, variability = 0.05 → near 0.
+        let score = fall_risk_score(110.0, 0.05, 0.05);
+        assert!(
+            score < 0.1,
+            "low-risk gait should score < 0.1, got {}",
+            score
+        );
+    }
+
+    // -- Butterworth bandpass -----------------------------------------------
+
+    #[test]
+    fn test_butterworth_passthrough() {
+        // A 1 Hz sine wave should pass through a 0.1–5 Hz bandpass filter
+        // with meaningful (non-zero) output.
+        let mut bp = ButterworthBandpass::new(100.0, 0.1, 5.0);
+        let signal: Vec<f64> = (0..200)
+            .map(|i| libm::sin(2.0 * core::f64::consts::PI * 1.0 * i as f64 / 100.0))
+            .collect();
+        // Let the filter settle for half the samples.
+        let output: Vec<f64> = signal.iter().map(|&x| bp.filter(x)).collect();
+        let rms_out = libm::sqrt(
+            output[100..].iter().map(|v| v * v).sum::<f64>() / 100.0,
+        );
+        assert!(
+            rms_out > 0.1,
+            "in-band signal should not be heavily attenuated, rms={}",
+            rms_out
+        );
+    }
+
+    #[test]
+    fn test_butterworth_attenuates_dc() {
+        // DC (0 Hz) should be blocked by the bandpass filter.
+        let mut bp = ButterworthBandpass::new(100.0, 0.5, 5.0);
+        // Feed a constant DC signal — the bandpass should attenuate it.
+        let output: Vec<f64> = (0..200).map(|_| bp.filter(1.0)).collect();
+        // After settling (skip first 50 samples), output should be near zero.
+        let max_abs = output[50..]
+            .iter()
+            .map(|v| if *v < 0.0 { -*v } else { *v })
+            .fold(0.0f64, f64::max);
+        assert!(
+            max_abs < 0.5,
+            "DC should be attenuated by bandpass filter, max_abs={}",
+            max_abs
+        );
     }
 }

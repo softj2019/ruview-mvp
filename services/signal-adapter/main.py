@@ -1589,6 +1589,149 @@ async def ingest_csi(payload: dict):
     return {"processed": 1}
 
 
+@app.get("/api/sleep/status")
+async def sleep_status():
+    """현재 수면 단계 및 최근 무호흡 이벤트."""
+    devices = list(runtime.devices.values())
+    stage_priority = ["rem", "deep", "light", "wake", "unknown"]
+    stages = [d.get("sleep_stage", "unknown") for d in devices]
+
+    def stage_rank(s: str) -> int:
+        try:
+            return stage_priority.index(s)
+        except ValueError:
+            return len(stage_priority)
+
+    dominant_stage = min(stages, key=stage_rank) if stages else "unknown"
+    online_devices = [d for d in devices if d.get("status") == "online"]
+    return {
+        "sleep_stage": dominant_stage,
+        "apnea_events_last_hour": sum(1 for d in devices if d.get("apnea_event")),
+        "devices": [
+            {
+                "id": d["id"],
+                "sleep_stage": d.get("sleep_stage", "unknown"),
+                "apnea": d.get("apnea_event", False),
+            }
+            for d in online_devices
+        ],
+    }
+
+
+@app.get("/api/sleep/report")
+async def sleep_report():
+    """일간 수면 품질 리포트."""
+    devices = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    stage_counts: dict[str, int] = {"wake": 0, "light": 0, "deep": 0, "rem": 0}
+    for d in devices:
+        s = d.get("sleep_stage", "wake")
+        if s in stage_counts:
+            stage_counts[s] += 1
+    return {
+        "stage_distribution": stage_counts,
+        "total_apnea_events": sum(1 for d in devices if d.get("apnea_event")),
+    }
+
+
+@app.get("/api/gait/analysis")
+async def gait_analysis():
+    """보행 분석 — 케이던스, 비대칭성, 변동성, 낙상 위험도."""
+    devices = [d for d in runtime.devices.values() if d.get("status") == "online"]
+    return {
+        "devices": [
+            {
+                "id": d["id"],
+                "cadence": d.get("gait_cadence", 0.0),
+                "asymmetry": d.get("gait_asymmetry", 0.0),
+                "variability": d.get("gait_variability", 0.0),
+                "fall_risk": d.get("fall_risk_score", 0.0),
+            }
+            for d in devices
+        ]
+    }
+
+
+@app.get("/api/analytics/paths")
+async def analytics_paths():
+    """리테일 경로 분석 — 존 간 이동 경로."""
+    zones = runtime.zones
+    return {
+        "zone_count": len(zones),
+        "transitions": [],
+        "message": "리테일 경로 분석 - Phase B 구현",
+    }
+
+
+@app.get("/api/analytics/heatmap")
+async def analytics_heatmap():
+    """공간 재실 히트맵 — 존별 체류 시간."""
+    zones = runtime.zones
+    return {
+        "heatmap": [
+            {
+                "zone_id": z.get("id"),
+                "dwell_seconds": z.get("presenceCount", 0) * 60,
+            }
+            for z in zones
+        ],
+    }
+
+
+@app.get("/api/analytics/queue")
+async def analytics_queue():
+    """대기열 분석."""
+    return {
+        "queue_length": 0,
+        "estimated_wait_seconds": 0,
+        "message": "대기열 분석 - Phase B 구현",
+    }
+
+
+@app.put("/api/zones/{zone_id}/config", dependencies=[Depends(verify_api_key)])
+async def zone_config(zone_id: str, body: dict):
+    """존 설정 업데이트: restricted, loitering_threshold_seconds."""
+    for z in runtime.zones:
+        if z.get("id") == zone_id:
+            if "restricted" in body:
+                z["restricted"] = bool(body["restricted"])
+            if "loitering_threshold_seconds" in body:
+                z["loitering_threshold_seconds"] = int(body["loitering_threshold_seconds"])
+            # 이벤트 엔진에 zone 설정 동기화
+            runtime.event_engine.update_zone_config(
+                zone_id,
+                restricted=bool(z.get("restricted", False)),
+                loitering_threshold_seconds=z.get("loitering_threshold_seconds"),
+            )
+            await runtime.broadcast_zones()
+            return {"status": "ok", "zone": z}
+    return {"status": "not_found"}
+
+
+_emergency_contacts: list[dict] = []
+
+
+@app.get("/api/alerts/contacts")
+async def get_contacts():
+    """긴급 연락처 목록 조회."""
+    return {"data": _emergency_contacts}
+
+
+@app.post("/api/alerts/contacts", dependencies=[Depends(verify_api_key)])
+async def add_contact(body: dict):
+    """긴급 연락처 추가."""
+    _emergency_contacts.append(body)
+    return {"status": "ok", "contact": body}
+
+
+@app.delete("/api/alerts/contacts/{idx}", dependencies=[Depends(verify_api_key)])
+async def delete_contact(idx: int):
+    """긴급 연락처 삭제."""
+    if 0 <= idx < len(_emergency_contacts):
+        removed = _emergency_contacts.pop(idx)
+        return {"status": "ok", "removed": removed}
+    return {"status": "not_found"}
+
+
 @app.get("/api/rf-tomography")
 async def rf_tomography(rows: int = 20, cols: int = 20, lambda_reg: float = 0.1):
     """RF 토모그래피 — ISTA 알고리즘으로 공간 점유도 격자 재구성.

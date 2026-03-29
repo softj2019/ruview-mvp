@@ -62,6 +62,27 @@ class ProcessedCSI:
     presence_motion_level: str | None = None   # "absent" | "present_still" | "active"
     presence_confidence: float = 0.0
 
+    # Sleep monitoring
+    sleep_stage: str = "unknown"        # "wake"|"light"|"deep"|"rem"|"unknown"
+    apnea_event: bool = False           # 무호흡 이벤트 발생 여부
+    apnea_duration: float = 0.0         # 지속 초
+
+    # Gait analysis
+    gait_cadence: float = 0.0           # 분당 걸음 수
+    gait_asymmetry: float = 0.0         # 좌우 비대칭 비율 (0=대칭)
+    gait_variability: float = 0.0       # 속도 변동성
+    fall_risk_score: float = 0.0        # 0~1 낙상 위험도
+
+    # HRV / Arrhythmia
+    sdnn: float = 0.0                   # HRV SDNN ms
+    rmssd: float = 0.0                  # HRV RMSSD ms
+    pnn50: float = 0.0                  # PNN50 %
+    arrhythmia_flag: bool = False       # 부정맥 감지
+
+    # Emotion
+    emotion_state: str = "calm"         # "calm"|"stressed"|"agitated"
+    emotion_confidence: float = 0.5
+
 
 class WelfordStats:
     """Windowed Welford online statistics with EMA decay.
