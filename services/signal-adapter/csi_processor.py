@@ -83,6 +83,9 @@ class ProcessedCSI:
     emotion_state: str = "calm"         # "calm"|"stressed"|"agitated"
     emotion_confidence: float = 0.5
 
+    # ADR-037 Phase 1: 고유값 기반 인원수 추정
+    person_count_estimate: int = 0
+
 
 class WelfordStats:
     """Windowed Welford online statistics with EMA decay.
@@ -342,6 +345,9 @@ class CSIProcessor:
         else:
             estimated_persons, per_person_breathing = 0, None
 
+        # --- ADR-037 Phase 1: 고유값 기반 인원수 추정 ---
+        person_count_estimate = self._estimate_person_count(csi_data)
+
         # --- Step 7: CSI-based pose classification ---
         csi_pose, csi_pose_confidence = self._classify_pose_csi(
             motion_index, breathing_rate, doppler_velocity
@@ -412,6 +418,7 @@ class CSIProcessor:
             through_wall=through_wall,
             presence_motion_level=presence_motion_level,
             presence_confidence=presence_confidence,
+            person_count_estimate=person_count_estimate,
         )
 
     # ------------------------------------------------------------------
@@ -1463,3 +1470,48 @@ class CSIProcessor:
             result = np.full(n, 0.5, dtype=np.float64)
 
         return result
+
+    # ------------------------------------------------------------------
+    # ADR-037 Phase 1: Eigenvalue-based occupancy counting
+    # ------------------------------------------------------------------
+
+    def _estimate_person_count(self, iq_data: list) -> int:
+        """ADR-037 Phase 1: 56×56 CSI 공분산 행렬 고유값 카운팅으로 인원수 추정.
+
+        참조: ruvnet/RuView ADR-037-multi-person-pose-detection
+        알고리즘: 슬라이딩 윈도우 CSI 공분산 행렬 → 고유값 분석 → 잡음 임계값 이상 고유값 수 = 인원수
+        정확도: 0-3명 범위에서 >80% (ADR-037 목표)
+        """
+        if not iq_data or len(iq_data) < 4:
+            return 0
+
+        # IQ → 복소수 행렬 변환
+        try:
+            arr = np.array(iq_data, dtype=complex)
+            if arr.ndim == 1:
+                # 단일 프레임: 서브캐리어 벡터로 처리
+                n_sub = len(arr)
+                if n_sub < 4:
+                    return 0
+                # 공분산 행렬 계산 (서브캐리어 × 서브캐리어)
+                mat = arr.reshape(-1, 1)
+            else:
+                mat = arr  # (frames, subcarriers)
+
+            # 공분산 행렬
+            if mat.ndim == 1:
+                mat = mat.reshape(1, -1)
+            cov = np.cov(mat.T if mat.shape[0] > mat.shape[1] else mat)
+
+            # 고유값 계산 (실수 부분만)
+            eigenvalues = np.linalg.eigvalsh(np.abs(cov))
+            eigenvalues = np.sort(eigenvalues)[::-1]  # 내림차순
+
+            # 잡음 임계값: 중앙값의 3배 이상인 고유값만 유의미
+            noise_floor = np.median(eigenvalues) * 3.0
+            significant = np.sum(eigenvalues > noise_floor)
+
+            # 0-3명으로 클리핑
+            return int(np.clip(significant, 0, 3))
+        except Exception:
+            return 0

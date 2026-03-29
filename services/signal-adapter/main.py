@@ -14,6 +14,7 @@ import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
 
 async def verify_api_key(authorization: str | None = Header(None)):
@@ -39,6 +40,7 @@ try:
     from .emotion_estimator import EmotionEstimator
     from .panic_detector import PanicDetector
     from .retail_analytics import RetailAnalytics
+    from .phase_sanitizer import PhaseSanitizer
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
@@ -52,6 +54,7 @@ except ImportError:
     from emotion_estimator import EmotionEstimator
     from panic_detector import PanicDetector
     from retail_analytics import RetailAnalytics
+    from phase_sanitizer import PhaseSanitizer
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -259,6 +262,19 @@ class SignalAdapterRuntime:
         self.emotion_estimator = EmotionEstimator()
         self.panic_detector = PanicDetector()
         self.retail_analytics = RetailAnalytics()
+        # Phase sanitization (vendor/ruview-temp phase_sanitizer port)
+        self.phase_sanitizer = PhaseSanitizer.with_defaults()
+        # Runtime-settable configuration (overridable via /api/v1/settings/*)
+        self._settings: dict[str, Any] = {
+            "fall_detection_threshold": 8.0,
+            "presence_threshold": 0.20,
+            "weak_signal_threshold": -75,
+            "motion_energy_min": 0.5,
+            "camera_resolution": "720p",
+            "camera_fps": 30,
+            "camera_blur": True,
+            "camera_confidence": 0.4,
+        }
 
     def _ensure_notifier_backends(self) -> None:
         """Lazily add WebSocket and Webhook backends once broadcast is available."""
@@ -961,6 +977,15 @@ class SignalAdapterRuntime:
         device["motion_energy"] = processed.motion_index
         device["presence_score"] = processed.presence_score
 
+        # Phase sanitization: unwrap → remove outliers → smooth
+        if processed.phase:
+            try:
+                _phase_arr = np.array(processed.phase, dtype=np.float64).reshape(1, -1)
+                _sanitized = self.phase_sanitizer.sanitize_phase(_phase_arr)
+                processed.phase = _sanitized[0].tolist()
+            except Exception:
+                pass  # keep original phase on any sanitization error
+
         # AoA 위치 추정용 위상/진폭 데이터 저장 (최대 64 서브캐리어)
         _amp_full = processed.amplitude or []
         _phase_full = processed.phase if hasattr(processed, 'phase') else []
@@ -974,6 +999,9 @@ class SignalAdapterRuntime:
             device["csi_per_person_breathing"] = processed.per_person_breathing
         else:
             device.pop("csi_per_person_breathing", None)
+
+        # ADR-037 Phase 1: 고유값 기반 인원수 추정
+        device["person_count_estimate"] = getattr(processed, "person_count_estimate", 0)
 
         # Body Velocity Profile (BVP)
         if processed.velocity_profile is not None:
@@ -1705,6 +1733,66 @@ async def patch_thresholds(body: dict):
     return {"status": "ok", **result}
 
 
+# ─── Settings: thresholds ─────────────────────────────────────────────────────
+
+class ThresholdSettings(BaseModel):
+    fallDetectionThreshold: float = 8.0
+    presenceThreshold: float = 0.20
+    weakSignalThreshold: float = -75
+    motionEnergyMin: float = 0.5
+
+
+@app.post("/api/v1/settings/thresholds", dependencies=[Depends(verify_api_key)])
+async def update_thresholds(settings: ThresholdSettings):
+    """Update runtime detection thresholds."""
+    runtime._settings["fall_detection_threshold"] = settings.fallDetectionThreshold
+    runtime._settings["presence_threshold"] = settings.presenceThreshold
+    runtime._settings["weak_signal_threshold"] = settings.weakSignalThreshold
+    runtime._settings["motion_energy_min"] = settings.motionEnergyMin
+    return {"status": "ok", "applied": settings.dict()}
+
+
+@app.get("/api/v1/settings/thresholds")
+async def get_thresholds():
+    """Return current runtime detection thresholds."""
+    return {
+        "fallDetectionThreshold": runtime._settings.get("fall_detection_threshold", 8.0),
+        "presenceThreshold": runtime._settings.get("presence_threshold", 0.20),
+        "weakSignalThreshold": runtime._settings.get("weak_signal_threshold", -75),
+        "motionEnergyMin": runtime._settings.get("motion_energy_min", 0.5),
+    }
+
+
+# ─── Settings: camera ─────────────────────────────────────────────────────────
+
+class CameraSettings(BaseModel):
+    resolution: str = "720p"
+    fps: int = 30
+    blurEnabled: bool = True
+    detectionConfidence: float = 0.4
+
+
+@app.post("/api/v1/settings/camera", dependencies=[Depends(verify_api_key)])
+async def update_camera_settings(settings: CameraSettings):
+    """Update runtime camera settings."""
+    runtime._settings["camera_resolution"] = settings.resolution
+    runtime._settings["camera_fps"] = settings.fps
+    runtime._settings["camera_blur"] = settings.blurEnabled
+    runtime._settings["camera_confidence"] = settings.detectionConfidence
+    return {"status": "ok", "applied": settings.dict()}
+
+
+@app.get("/api/v1/settings/camera")
+async def get_camera_settings():
+    """Return current runtime camera settings."""
+    return {
+        "resolution": runtime._settings.get("camera_resolution", "720p"),
+        "fps": runtime._settings.get("camera_fps", 30),
+        "blurEnabled": runtime._settings.get("camera_blur", True),
+        "detectionConfidence": runtime._settings.get("camera_confidence", 0.4),
+    }
+
+
 @app.get("/api/learning-report")
 async def get_learning_report():
     """Return current Learning Report snapshot (saves to logs/)."""
@@ -2067,7 +2155,13 @@ async def aoa_position():
             phases=phases,
             amplitudes=amplitudes_raw,
         )
-    return runtime._aoa_estimator.get_all_estimates()
+    estimates = runtime._aoa_estimator.get_all_estimates()
+    # ADR-037 Phase 1: 고유값 기반 인원수 추정 집계
+    estimates["person_count_estimate"] = max(
+        (d.get("person_count_estimate", 0) for d in online),
+        default=0,
+    )
+    return estimates
 
 
 @app.get("/api/multistatic/fusion")
