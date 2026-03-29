@@ -10,6 +10,7 @@ import SignalChart from '@/components/charts/SignalChart';
 import { Card, CardHeader, CardContent } from '@/components/ui/Card';
 import { useZoneStore } from '@/stores/zoneStore';
 import { useDeviceStore } from '@/stores/deviceStore';
+import DashboardHud from '@/components/DashboardHud';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -343,6 +344,9 @@ export default function DashboardPage() {
 
       {/* KPI Cards */}
       <KpiCards />
+
+      {/* Sensing HUD — 연결 상태, FPS, 인원 수, 신뢰도, 모드 (ruvnet dashboard-hud.js) */}
+      <DashboardHud />
 
       {/* System Component Status (ruvnet DashboardTab integration) */}
       <SystemComponentsPanel />

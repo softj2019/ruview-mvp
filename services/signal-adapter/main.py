@@ -41,6 +41,8 @@ try:
     from .panic_detector import PanicDetector
     from .retail_analytics import RetailAnalytics
     from .phase_sanitizer import PhaseSanitizer
+    from .metrics_service import MetricsService
+    from .stream_service import StreamService
 except ImportError:
     from ws_manager import ConnectionManager
     from csi_processor import CSIProcessor, ProcessedCSI, WelfordStats
@@ -55,6 +57,11 @@ except ImportError:
     from panic_detector import PanicDetector
     from retail_analytics import RetailAnalytics
     from phase_sanitizer import PhaseSanitizer
+    from metrics_service import MetricsService
+    from stream_service import StreamService
+
+from health_check_service import HealthCheckService
+from orchestrator_service import OrchestratorService
 
 
 load_dotenv(os.path.join(os.path.dirname(__file__), "../../.env"))
@@ -264,6 +271,12 @@ class SignalAdapterRuntime:
         self.retail_analytics = RetailAnalytics()
         # Phase sanitization (vendor/ruview-temp phase_sanitizer port)
         self.phase_sanitizer = PhaseSanitizer.with_defaults()
+        # Health monitoring and service orchestration
+        self.health_check = HealthCheckService()
+        self.orchestrator = OrchestratorService()
+        # Metrics collection and stream buffering
+        self.metrics_service = MetricsService()
+        self.stream_service = StreamService()
         # Runtime-settable configuration (overridable via /api/v1/settings/*)
         self._settings: dict[str, Any] = {
             "fall_detection_threshold": 8.0,
@@ -560,6 +573,19 @@ class SignalAdapterRuntime:
                 "timestamp": iso_now(),
             }
         )
+        # Buffer in StreamService for replay on new connections
+        if message_type == "signal":
+            self.stream_service.signal_buffer.append({
+                "type": message_type,
+                "timestamp": iso_now(),
+                "data": payload,
+            })
+        elif message_type == "event":
+            self.stream_service.event_buffer.append({
+                "type": message_type,
+                "timestamp": iso_now(),
+                "data": payload,
+            })
         # Local WebSocket clients
         await self.manager.broadcast(encoded)
         # Cloudflare relay (if bridge connected)
@@ -731,6 +757,10 @@ class SignalAdapterRuntime:
 
     async def handle_processed(self, processed: ProcessedCSI) -> None:
         events = self.event_engine.evaluate(processed)
+
+        # --- Metrics recording ---
+        runtime.metrics_service.record("csi_processed", 1)
+        runtime.metrics_service.record("motion_index", processed.motion_index)
 
         # --- Fall Detection ML integration (Phase 3-1~3-3) ---
         # Track motion history per device
@@ -1321,9 +1351,15 @@ async def lifespan(app: FastAPI):
         except Exception as _e:
             print(f"[signal-adapter] threshold_overrides 로드 실패: {_e}")
 
+    # Start orchestrator (health check loop + service registry)
+    await runtime.orchestrator.start()
+
     print(f"[signal-adapter] Starting up on UDP {UDP_HOST}:{UDP_PORT}...")
     yield
     print("[signal-adapter] Shutting down...")
+
+    # Stop orchestrator and health check service
+    await runtime.orchestrator.shutdown()
     if runtime.mmwave_bridge:
         runtime.mmwave_bridge.stop()
     if mmwave_task:
@@ -1353,6 +1389,7 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
+    health_data = runtime.health_check.get_status() if hasattr(runtime, "health_check") else {}
     return {
         "status": "ok",
         "service": "signal-adapter",
@@ -1360,12 +1397,17 @@ async def health():
         "udp_host": UDP_HOST,
         "udp_port": UDP_PORT,
         "devices": len(runtime.devices),
+        "health": health_data,
     }
 
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus-compatible metrics endpoint (text/plain exposition format)."""
+    """Prometheus-compatible metrics endpoint (text/plain exposition format).
+
+    Combines per-device/zone gauges with MetricsService time-series data
+    (csi_processed rate, motion_index, inference latency, system resources).
+    """
     from fastapi.responses import PlainTextResponse
 
     lines: list[str] = []
@@ -1410,6 +1452,50 @@ async def prometheus_metrics():
     lines.append("# HELP ruview_active_modality Current active sensing modality")
     lines.append("# TYPE ruview_active_modality gauge")
     lines.append(f'ruview_active_modality{{modality="{runtime._active_modality}"}} 1')
+
+    # ── MetricsService enrichment ────────────────────────────────────────────
+
+    # ruview_csi_processed_total — cumulative CSI frames processed by pipeline
+    csi_proc = runtime.metrics_service.get_counter_value("csi_processed")
+    lines.append("# HELP ruview_csi_processed_total CSI frames processed by signal pipeline")
+    lines.append("# TYPE ruview_csi_processed_total counter")
+    lines.append(f"ruview_csi_processed_total {csi_proc}")
+
+    # ruview_motion_index — latest motion index across all devices
+    motion_val = runtime.metrics_service.get_metric_value("motion_index")
+    if motion_val is not None:
+        lines.append("# HELP ruview_motion_index Latest motion index from CSI processing")
+        lines.append("# TYPE ruview_motion_index gauge")
+        lines.append(f"ruview_motion_index {round(motion_val, 4)}")
+
+    # ruview_inference_latency — ML inference latency summary
+    lat_stats = runtime.metrics_service.get_histogram_stats("inference_latency")
+    if lat_stats:
+        lines.append("# HELP ruview_inference_latency_seconds ML inference latency")
+        lines.append("# TYPE ruview_inference_latency_seconds summary")
+        lines.append(f'ruview_inference_latency_seconds{{quantile="0.5"}} {lat_stats.get("p50", 0)}')
+        lines.append(f'ruview_inference_latency_seconds{{quantile="0.9"}} {lat_stats.get("p90", 0)}')
+        lines.append(f'ruview_inference_latency_seconds{{quantile="0.99"}} {lat_stats.get("p99", 0)}')
+        lines.append(f'ruview_inference_latency_seconds_sum {lat_stats.get("sum", 0)}')
+        lines.append(f'ruview_inference_latency_seconds_count {lat_stats.get("count", 0)}')
+
+    # ruview_system_cpu_usage / memory_usage — latest psutil snapshot
+    cpu = runtime.metrics_service.get_metric_value("system_cpu_usage")
+    mem = runtime.metrics_service.get_metric_value("system_memory_usage")
+    if cpu is not None:
+        lines.append("# HELP ruview_system_cpu_usage System CPU usage percent")
+        lines.append("# TYPE ruview_system_cpu_usage gauge")
+        lines.append(f"ruview_system_cpu_usage {round(cpu, 1)}")
+    if mem is not None:
+        lines.append("# HELP ruview_system_memory_usage System memory usage percent")
+        lines.append("# TYPE ruview_system_memory_usage gauge")
+        lines.append(f"ruview_system_memory_usage {round(mem, 1)}")
+
+    # ruview_active_ws_connections — StreamService connection count
+    stream_conns = len(runtime.stream_service.connections)
+    lines.append("# HELP ruview_active_ws_connections Active WebSocket client connections")
+    lines.append("# TYPE ruview_active_ws_connections gauge")
+    lines.append(f"ruview_active_ws_connections {stream_conns}")
 
     body = "\n".join(lines) + "\n"
     return PlainTextResponse(body, media_type="text/plain; version=0.0.4; charset=utf-8")

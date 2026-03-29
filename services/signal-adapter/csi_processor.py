@@ -86,6 +86,9 @@ class ProcessedCSI:
     # ADR-037 Phase 1: 고유값 기반 인원수 추정
     person_count_estimate: int = 0
 
+    # ADR-037 Phase 2: NMF 다인 신호 분리 성분 수
+    person_signals: int = 0
+
 
 class WelfordStats:
     """Windowed Welford online statistics with EMA decay.
@@ -348,6 +351,18 @@ class CSIProcessor:
         # --- ADR-037 Phase 1: 고유값 기반 인원수 추정 ---
         person_count_estimate = self._estimate_person_count(csi_data)
 
+        # --- ADR-037 Phase 2: NMF 다인 신호 분리 ---
+        person_signals = 0
+        if person_count_estimate >= 2 and len(amplitude) > 0:
+            try:
+                amplitude_arr = np.array(
+                    list(self._amplitude_buffer[device_id]), dtype=np.float64
+                )
+                components = self._decompose_persons_nmf(amplitude_arr, person_count_estimate)
+                person_signals = len(components)
+            except Exception:
+                person_signals = 0
+
         # --- Step 7: CSI-based pose classification ---
         csi_pose, csi_pose_confidence = self._classify_pose_csi(
             motion_index, breathing_rate, doppler_velocity
@@ -419,6 +434,7 @@ class CSIProcessor:
             presence_motion_level=presence_motion_level,
             presence_confidence=presence_confidence,
             person_count_estimate=person_count_estimate,
+            person_signals=person_signals,
         )
 
     # ------------------------------------------------------------------
@@ -1515,3 +1531,41 @@ class CSIProcessor:
             return int(np.clip(significant, 0, 3))
         except Exception:
             return 0
+
+    def _decompose_persons_nmf(self, spectrogram: np.ndarray, n_persons: int) -> list[np.ndarray]:
+        """ADR-037 Phase 2: NMF으로 다인 신호 분리.
+
+        CSI 스펙트로그램을 n_persons개 성분으로 분해.
+        각 성분 = 한 사람의 움직임 신호.
+
+        참조: ruvnet/RuView ADR-037-multi-person-pose-detection Phase 2
+        """
+        if n_persons <= 1 or spectrogram is None:
+            return [spectrogram] if spectrogram is not None else []
+
+        try:
+            from sklearn.decomposition import NMF
+
+            # 스펙트로그램 비음수 변환
+            S = np.abs(spectrogram)
+            if S.ndim == 1:
+                S = S.reshape(1, -1)
+
+            # NMF 분해: k=n_persons 성분
+            n_components = min(n_persons, S.shape[0], S.shape[1])
+            if n_components < 1:
+                return [S]
+
+            model = NMF(n_components=n_components, max_iter=200, random_state=42)
+            W = model.fit_transform(S)  # (frames, n_persons)
+            H = model.components_       # (n_persons, subcarriers)
+
+            # 각 성분을 개별 신호로 반환
+            components = []
+            for i in range(n_components):
+                component = np.outer(W[:, i], H[i, :])
+                components.append(component)
+
+            return components
+        except Exception:
+            return [spectrogram]
